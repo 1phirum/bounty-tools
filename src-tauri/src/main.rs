@@ -48,6 +48,12 @@ fn main() {
             commands::jobs::cancel_job,
             commands::findings::list_findings,
             commands::findings::create_finding,
+            commands::traffic::get_traffic_page,
+            commands::traffic::get_traffic_entry,
+            commands::traffic::clear_traffic,
+            commands::traffic::send_request,
+            commands::traffic::repeater_send,
+            commands::fuzzer::fuzzer_run,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

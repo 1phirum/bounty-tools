@@ -2,7 +2,7 @@ export type Severity = 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 export type Confidence = 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' | 'VERY_HIGH';
 export type FindingStatus = 'CANDIDATE' | 'NEEDS_REVIEW' | 'VERIFIED' | 'REJECTED' | 'DUPLICATE' | 'REPORTED' | 'RESOLVED';
 
-export type ScopeRuleType = 
+export type ScopeRuleType =
   | 'include_domain'
   | 'exclude_domain'
   | 'include_path'
@@ -38,7 +38,7 @@ export interface ScopeEvaluation {
 
 export type JobStatus = 'QUEUED' | 'RUNNING' | 'PAUSED' | 'CANCELLED' | 'FAILED' | 'COMPLETED';
 
-export type ModuleType = 
+export type ModuleType =
   | 'dns'
   | 'recon'
   | 'http_probe'
@@ -79,4 +79,63 @@ export interface Finding {
   notes: string | null;
   created_at: string;
   updated_at: string;
+}
+
+// ── Traffic types (new) ───────────────────────────────────────────
+
+/** Origin of a captured exchange. */
+export type TrafficSource = 'proxy' | 'repeater' | 'fuzzer';
+
+export interface TrafficHttpRequest {
+  id: string;
+  job_id: string | null;
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body: string | null;
+  timestamp: string;
+}
+
+export interface TrafficHttpResponse {
+  id: string;
+  request_id: string;
+  status_code: number;
+  headers: Record<string, string>;
+  body: string;
+  size_bytes: number;
+  duration_ms: number;
+  timestamp: string;
+}
+
+export interface TrafficEntry {
+  id: string;
+  request: TrafficHttpRequest;
+  response: TrafficHttpResponse | null;
+  captured_at: string;
+  fingerprint: string;
+  source: TrafficSource;
+}
+
+export interface TrafficPage {
+  entries: TrafficEntry[];
+  total: number;
+  evicted: number;
+}
+
+// ── Fuzzer types (new) ────────────────────────────────────────────
+
+export interface FuzzIterationResult {
+  replacements: Record<string, string>;
+  status: number;
+  duration_ms: number;
+  size_bytes: number;
+  body_hash: string;
+}
+
+export interface FuzzRunSummary {
+  total: number;
+  completed: number;
+  failed: number;
+  deduped: number;
+  results: FuzzIterationResult[];
 }
