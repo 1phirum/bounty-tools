@@ -1,0 +1,13 @@
+id = "generic-sql-error-001"
+name = "Generic SQL Syntax / Driver Error"
+category = "error-analysis"
+patterns = [
+    "you have an error in your sql syntax",
+    "unclosed quotation mark after the character string",
+    "quoted string not properly terminated",
+    "sqlstate[42000]",
+    "database error:",
+    "fatal: syntax error",
+    "unexpected end of SQL command"
+]
+confidence_delta = 25

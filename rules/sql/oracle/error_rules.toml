@@ -1,0 +1,11 @@
+id = "oracle-error-001"
+name = "Oracle Database Error Fingerprint"
+category = "error-analysis"
+dbms = "oracle"
+patterns = [
+    "ora-01756: quoted string not properly terminated",
+    "ora-00933: SQL command not properly ended",
+    "ora-00907: missing right parenthesis",
+    "oracle error"
+]
+confidence_delta = 35

@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+@theme {
+  --color-cyber-base: #090d16;
+  --color-cyber-surface: #0e1526;
+  --color-cyber-elevated: #121d34;
+  --color-cyber-hover: #162442;
+  --color-cyber-border: #1a2540;
+  --color-cyber-border-accent: #243459;
+  
+  --color-neon-cyan: #38bdf8;
+  --color-neon-emerald: #10b981;
+  --color-neon-amber: #f59e0b;
+  --color-neon-crimson: #f43f5e;
+
+  --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+body {
+  background-color: #090d16;
+  color: #e2e8f0;
+  font-family: var(--font-sans);
+  overflow: hidden;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Workstation stability: strictly NO scaling on hover and NO layout shifts */
+*, *::before, *::after {
+  box-sizing: border-box;
+  scale: none !important;
+}
+
+button:hover, a:hover, tr:hover, div:hover {
+  transform: none !important;
+  scale: none !important;
+}
+
+/* Crisp, fast workstation transitions without motion/scale */
+button, a, input, select, textarea, tr {
+  transition: background-color 75ms ease, border-color 75ms ease, color 75ms ease !important;
+}
+
+/* Custom workstation scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #090d16;
+}
+::-webkit-scrollbar-thumb {
+  background: #1a2540;
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #243459;
+}

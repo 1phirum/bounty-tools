@@ -1,0 +1,12 @@
+id = "sqlite-error-001"
+name = "SQLite Driver / Syntax Error Fingerprint"
+category = "error-analysis"
+dbms = "sqlite"
+patterns = [
+    "sqlite3.operationalerror",
+    "sqlite_error",
+    "unrecognized token:",
+    "incomplete input",
+    "near \".*\": syntax error"
+]
+confidence_delta = 35

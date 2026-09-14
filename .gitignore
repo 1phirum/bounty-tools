@@ -1,0 +1,63 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Node / JS / React / Vite
+node_modules/
+dist/
+dist-ssr/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Tauri
+src-tauri/target/
+
+# Go
+engines/**/bin/
+engines/**/*.exe
+engines/**/*.test
+engines/**/*.out
+
+# Environment & Config
+.env
+.env.local
+.env.*.local
+*.pem
+
+# SQLite databases universally
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# BugTools Workspace Data
+workspace/projects/*
+workspace/exports/*
+workspace/logs/*
+workspace/cache/*
+
+# Keep workspace structure intact
+!workspace/**/.gitkeep
+!workspace/projects/.gitkeep
+!workspace/exports/.gitkeep
+!workspace/logs/.gitkeep
+!workspace/cache/.gitkeep
+
+# Operating System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.tmp
+*.bak
+*.swp
+*~

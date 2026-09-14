@@ -1,0 +1,12 @@
+id = "mysql-error-001"
+name = "MySQL / MariaDB Syntax Error"
+category = "error-analysis"
+dbms = "mysql"
+patterns = [
+    "check the manual that corresponds to your MySQL server version",
+    "check the manual that corresponds to your MariaDB server version",
+    "com.mysql.jdbc.exceptions",
+    "MySqlException",
+    "valid MySQL result"
+]
+confidence_delta = 35

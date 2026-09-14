@@ -1,0 +1,11 @@
+id = "mssql-error-001"
+name = "Microsoft SQL Server Error Fingerprint"
+category = "error-analysis"
+dbms = "mssql"
+patterns = [
+    "driver][sql server]",
+    "microsoft ole db provider for sql server",
+    "unclosed quotation mark after the character string",
+    "line 1: incorrect syntax near"
+]
+confidence_delta = 35

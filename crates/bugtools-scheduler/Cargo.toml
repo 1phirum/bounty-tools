@@ -1,0 +1,14 @@
+[package]
+name = "bugtools-scheduler"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+bugtools-core = { path = "../bugtools-core" }
+bugtools-events = { path = "../bugtools-events" }
+tokio = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

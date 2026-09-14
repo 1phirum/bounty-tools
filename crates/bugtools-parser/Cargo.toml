@@ -1,0 +1,14 @@
+[package]
+name = "bugtools-parser"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+bugtools-core = { path = "../bugtools-core" }
+regex = { workspace = true }
+url = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

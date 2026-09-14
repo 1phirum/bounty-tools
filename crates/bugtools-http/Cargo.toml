@@ -1,0 +1,16 @@
+[package]
+name = "bugtools-http"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+bugtools-core = { path = "../bugtools-core" }
+bugtools-scope = { path = "../bugtools-scope" }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

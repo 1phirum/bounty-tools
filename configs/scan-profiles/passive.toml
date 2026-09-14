@@ -1,0 +1,16 @@
+[profile]
+id = "passive-recon"
+name = "Passive Reconnaissance"
+description = "DNS resolution and non-intrusive metadata gathering"
+
+[limits]
+requests_per_second = 3.0
+max_concurrency = 2
+timeout_seconds = 10
+max_requests_per_job = 200
+
+[modules]
+dns_resolution = true
+http_probing = true
+crawler = false
+sql_analysis = false

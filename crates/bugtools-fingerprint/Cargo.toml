@@ -1,0 +1,14 @@
+[package]
+name = "bugtools-fingerprint"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+bugtools-core = { path = "../bugtools-core" }
+sha2 = { workspace = true }
+regex = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

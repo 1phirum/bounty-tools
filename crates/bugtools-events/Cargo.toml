@@ -1,0 +1,13 @@
+[package]
+name = "bugtools-events"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+bugtools-core = { path = "../bugtools-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,13 @@
+id = "postgres-error-001"
+name = "PostgreSQL Driver / Query Error"
+category = "error-analysis"
+dbms = "postgresql"
+patterns = [
+    "pg_query(): query failed:",
+    "psycopg2.errors",
+    "org.postgresql.util.psqlexception",
+    "syntax error at or near",
+    "unterminated quoted string at or near",
+    "pg_catalog."
+]
+confidence_delta = 35

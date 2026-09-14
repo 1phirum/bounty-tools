@@ -1,0 +1,16 @@
+[profile]
+id = "conservative-sql"
+name = "Conservative SQL Review"
+description = "Strictly bounded, baseline-first SQL context & differential analysis"
+
+[limits]
+requests_per_second = 2.0
+max_concurrency = 2
+timeout_seconds = 15
+max_requests_per_job = 300
+
+[analysis]
+baseline_repetitions = 3
+enable_error_analysis = true
+enable_differential_analysis = true
+enable_timing_analysis = false
