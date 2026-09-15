@@ -272,7 +272,7 @@ impl Workstation {
                 
                 let res = ui.add(
                     egui::TextEdit::singleline(&mut self.sql_filter)
-                        .hint_text("Target URL (e.g. https://example.com) or Clause (e.g. 'postgres')")
+                        .hint_text("Target URL with a query param (e.g. https://host/path?id=1) — Live Scan probes the first param")
                         .desired_width(search_bar_width - 320.0)
                         .margin(egui::vec2(12.0, 12.0))
                 );
@@ -285,6 +285,9 @@ impl Workstation {
                     [100.0, 42.0],
                     egui::Button::new(RichText::new("Live Scan").color(Color32::from_rgb(10, 14, 22))).fill(CYAN)
                 ).clicked() || (res.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                    // Live Scan runs the real, scope-checked DBMS probe
+                    // pipeline. No output is fabricated — logs come from the
+                    // actual per-probe results.
                     self.sql_logs.clear();
                     self.action(Action::SqlSimulate { target: query.clone() });
                 }

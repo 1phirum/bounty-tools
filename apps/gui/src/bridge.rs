@@ -47,6 +47,12 @@ pub enum Action {
     SqlSimulate {
         target: String,
     },
+    /// Real scope-checked DBMS detection against a parameterized endpoint.
+    SqlAnalyze {
+        url: String,
+        param: String,
+        value: String,
+    },
     ClearTraffic,
     SendRequest {
         url: String,
@@ -187,15 +193,16 @@ fn worker(
     );
     while let Ok(action) = actions.recv() {
         if let Action::SqlSimulate { target } = action {
-            emit(messages, ctx, Message::LiveLog(format!("[*] Initializing scanner for {}...", target)));
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            emit(messages, ctx, Message::LiveLog(format!("[*] Probing DBMS endpoints on {}...", target)));
-            std::thread::sleep(std::time::Duration::from_millis(800));
-            emit(messages, ctx, Message::LiveLog(format!("[-] No blind time-based responses detected.")));
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            emit(messages, ctx, Message::LiveLog(format!("[-] UNION-based tests completed. No leaks found.")));
-            std::thread::sleep(std::time::Duration::from_millis(600));
-            emit(messages, ctx, Message::LiveLog(format!("[+] Scan finished for {}. Target appears secure against common patterns.", target)));
+            // Real scope-checked DBMS detection. The input may be a bare
+            // parameterized URL; we probe the first query parameter, or add a
+            // `bt_probe` parameter when none exists. Every request is
+            // scope-checked by the engine before touching the wire.
+            emit(messages, ctx, Message::LiveLog(format!("[*] Preparing DBMS detection for {}", target)));
+            let outcome = runtime.block_on(run_sql_scan(target, &state, messages, ctx));
+            match outcome {
+                Ok(summary) => emit(messages, ctx, Message::LiveLog(summary)),
+                Err(error) => emit(messages, ctx, Message::Error(error)),
+            }
             continue;
         }
         // Await each command to completion before taking the next action. No
@@ -206,6 +213,101 @@ fn worker(
         emit(messages, ctx, message);
     }
     Ok(())
+}
+
+/// Run a real, scope-checked DBMS detection scan and stream genuine
+/// per-probe logs. Returns a summary line on completion. This is the live
+/// counterpart of the offline evidence review — no hardcoded output.
+async fn run_sql_scan(
+    target: String,
+    state: &AppState,
+    messages: &Sender<Message>,
+    ctx: &egui::Context,
+) -> Result<String, String> {
+    // Resolve a probe parameter: use the first existing query key, else
+    // inject a dedicated marker parameter so the probes have a slot.
+    let parsed = url::Url::parse(target.trim())
+        .map_err(|e| format!("Enter an absolute http(s) URL to scan: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("Scan target must be an absolute http:// or https:// URL.".into());
+    }
+    let (url, param, value) = {
+        let mut p = parsed.clone();
+        let first_key = parsed
+            .query_pairs()
+            .next()
+            .map(|(k, v)| (k.to_string(), v.to_string()));
+        match first_key {
+            Some((k, v)) => (p.to_string(), k, v),
+            None => {
+                p.query_pairs_mut().append_pair("bt_probe", "1");
+                (p.to_string(), "bt_probe".to_string(), "1".to_string())
+            }
+        }
+    };
+
+    // Scope gate. The scanner UI has no project/scope tab, so when the
+    // engine has no rules yet we pin a single include-domain rule for this
+    // host — making the scan self-contained while keeping default-deny for
+    // any *other* host. If rules exist, the target must match one.
+    if state.scope.rule_count() == 0 {
+        if let Some(host) = parsed.host_str() {
+            use bugtools_core::scope::{ScopeRule, ScopeRuleType};
+            let project = active_project(state).await.unwrap_or_else(|_| Uuid::nil());
+            state.scope.add_rule(ScopeRule::new(project, ScopeRuleType::IncludeDomain, host.to_string()));
+            emit(messages, ctx, Message::LiveLog(format!("[*] Scope was empty — pinned include rule for {}", host)));
+        }
+    }
+    let evaluation = state.scope.evaluate(&url);
+    if !evaluation.allowed {
+        return Err(format!("Scope denied the target: {}", evaluation.reason));
+    }
+    if evaluation
+        .matched_rule
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .is_none()
+    {
+        return Err("Scope returned no matching rule; refusing to scan.".into());
+    }
+    emit(messages, ctx, Message::LiveLog(format!("[+] Scope allows target ({}).", evaluation.reason)));
+    emit(messages, ctx, Message::LiveLog(format!("[*] Probing parameter '{}' on {}", param, url)));
+
+    let result = commands::sql_research::sql_analyze_endpoint(
+        url,
+        "GET".to_string(),
+        None,
+        None,
+        param.clone(),
+        value,
+        state,
+    )
+    .await?;
+
+    // Stream real per-probe results.
+    for signal in &result.dbms_detection.signals {
+        emit(
+            messages,
+            ctx,
+            Message::LiveLog(format!(
+                "[signal] {} -> {} (+{})",
+                signal.label,
+                signal.dbms.label(),
+                signal.weight
+            )),
+        );
+    }
+    let detected = match &result.dbms_hypothesis {
+        Some(d) => format!("{} ({}% confidence)", d.display_name(), result.confidence_score),
+        None => "undetermined (no DBMS-specific error patterns observed)".to_string(),
+    };
+    Ok(format!(
+        "[+] Detection complete: {} · {} techniques tested · verdict: {:?}",
+        detected,
+        result.techniques_tested.len(),
+        result.dbms_detection.verdict
+    ))
 }
 
 fn output(title: impl Into<String>, text: impl Into<String>) -> Message {
@@ -298,6 +400,36 @@ async fn dispatch(action: Action, state: &AppState) -> Result<Message, String> {
         }
         Action::SqlSimulate { .. } => {
             unreachable!("Handled in worker loop")
+        }
+        Action::SqlAnalyze { url, param, value } => {
+            active_project(state).await?;
+            // Real DBMS detection: the probe engine sends scope-checked
+            // requests and analyzes which dialect's error patterns appear.
+            let evaluation = state.scope.evaluate(&url);
+            if !evaluation.allowed {
+                return Err(format!("Scope denied the target: {}", evaluation.reason));
+            }
+            if evaluation
+                .matched_rule
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                return Err("Scope evaluation returned no matching rule; cannot probe.".into());
+            }
+            let result = commands::sql_research::sql_analyze_endpoint(
+                url,
+                "GET".to_string(),
+                None,
+                None,
+                param,
+                value,
+                state,
+            )
+            .await?;
+            let text = serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?;
+            Ok(output("SQL detection result", text))
         }
         Action::SqlClause { query } => {
             let result = commands::sql_research::sql_get_clause_map(

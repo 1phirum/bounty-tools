@@ -42,6 +42,11 @@ impl ScopeEngine {
         }
     }
 
+    /// Number of rules currently held (any enabled state).
+    pub fn rule_count(&self) -> usize {
+        self.rules.read().map(|r| r.len()).unwrap_or(0)
+    }
+
     pub fn remove_rule(&self, rule_id: Uuid) {
         if let Ok(mut lock) = self.rules.write() {
             lock.retain(|r| r.id != rule_id);
