@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::state::AppState;
 use bugtools_core::events::BugToolsEvent;
 use bugtools_core::finding::{Confidence, Finding, FindingStatus, Severity};

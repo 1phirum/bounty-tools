@@ -1,5 +1,6 @@
 //! Serial, non-blocking UI/backend boundary. Only Refresh reads a snapshot.
 //! This module deliberately exposes no fuzzing, recon, or SQL probing actions.
+#![allow(dead_code)]
 use crate::{commands, state::AppState};
 use bugtools_core::{finding::Finding, job::Job, project::Project, scope::ScopeRule};
 use bugtools_storage::Database;
@@ -85,11 +86,19 @@ pub struct Snapshot {
     pub evicted: usize,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SubdomainEntry {
+    pub domain: String,
+    pub first_seen: String,
+    pub issuer: String,
+    pub cert_id: u64,
+}
+
 #[derive(Debug)]
 pub enum Message {
     Snapshot(Snapshot),
     Output { title: String, text: String },
-    Subdomains(Vec<String>),
+    Subdomains(Vec<SubdomainEntry>),
     LiveLog(String),
     Error(String),
 }
@@ -200,7 +209,13 @@ fn worker(
             emit(messages, ctx, Message::LiveLog(format!("[*] Preparing DBMS detection for {}", target)));
             let outcome = runtime.block_on(run_sql_scan(target, &state, messages, ctx));
             match outcome {
-                Ok(summary) => emit(messages, ctx, Message::LiveLog(summary)),
+                Ok(summary) => {
+                    emit(messages, ctx, Message::LiveLog(summary.clone()));
+                    emit(messages, ctx, Message::Output { 
+                        title: "Scan Complete".into(), 
+                        text: summary 
+                    });
+                }
                 Err(error) => emit(messages, ctx, Message::Error(error)),
             }
             continue;
@@ -226,8 +241,14 @@ async fn run_sql_scan(
 ) -> Result<String, String> {
     // Resolve a probe parameter: use the first existing query key, else
     // inject a dedicated marker parameter so the probes have a slot.
-    let parsed = url::Url::parse(target.trim())
-        .map_err(|e| format!("Enter an absolute http(s) URL to scan: {e}"))?;
+    let raw = target.trim().to_string();
+    let normalized = if !raw.starts_with("http://") && !raw.starts_with("https://") {
+        format!("https://{}", raw)
+    } else {
+        raw
+    };
+    let parsed = url::Url::parse(&normalized)
+        .map_err(|e| format!("Invalid URL '{}': {e}", normalized))?;
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err("Scan target must be an absolute http:// or https:// URL.".into());
     }
@@ -472,8 +493,14 @@ async fn dispatch(action: Action, state: &AppState) -> Result<Message, String> {
             let url = format!("https://crt.sh/?q=%.{}&output=json", domain);
             
             #[derive(serde::Deserialize)]
-            struct CrtShResult {
+            struct CrtShRecord {
+                #[serde(default)]
+                id: u64,
                 name_value: String,
+                #[serde(default)]
+                not_before: Option<String>,
+                #[serde(default)]
+                issuer_name: Option<String>,
             }
             
             let client = reqwest::Client::builder()
@@ -491,28 +518,49 @@ async fn dispatch(action: Action, state: &AppState) -> Result<Message, String> {
                 return Err(format!("crt.sh returned an error: {}", response.status()));
             }
             
-            let records: Vec<CrtShResult> = response
+            let records: Vec<CrtShRecord> = response
                 .json()
                 .await
                 .map_err(|e| format!("Failed to parse crt.sh JSON: {}", e))?;
-                
-            let mut subdomains: Vec<String> = Vec::new();
+            
+            // Build rich entries, keeping the earliest cert date per unique subdomain
+            let mut seen: HashMap<String, SubdomainEntry> = HashMap::new();
             for record in records {
+                let date = record.not_before.unwrap_or_else(|| "—".into());
+                let issuer = record.issuer_name
+                    .as_deref()
+                    .and_then(|s| {
+                        // Extract CN= or O= from the issuer DN
+                        s.split(',').find_map(|part| {
+                            let part = part.trim();
+                            if part.starts_with("CN=") { Some(part[3..].to_string()) }
+                            else if part.starts_with("O=") { Some(part[2..].to_string()) }
+                            else { None }
+                        })
+                    })
+                    .unwrap_or_else(|| "—".into());
+                    
                 for name in record.name_value.split('\n') {
                     let clean = name.trim().to_string();
-                    if !clean.is_empty() && clean != format!("*.{}", domain) && clean != domain {
-                        subdomains.push(clean);
+                    if clean.is_empty() || clean == format!("*.{}", domain) || clean == domain {
+                        continue;
                     }
+                    seen.entry(clean.clone()).or_insert_with(|| SubdomainEntry {
+                        domain: clean,
+                        first_seen: date.clone(),
+                        issuer: issuer.clone(),
+                        cert_id: record.id,
+                    });
                 }
             }
             
-            subdomains.sort();
-            subdomains.dedup();
+            let mut entries: Vec<SubdomainEntry> = seen.into_values().collect();
+            entries.sort_by(|a, b| a.domain.cmp(&b.domain));
             
-            if subdomains.is_empty() {
+            if entries.is_empty() {
                 Ok(output("No subdomains found", format!("crt.sh returned no subdomains for {}", domain)))
             } else {
-                Ok(Message::Subdomains(subdomains))
+                Ok(Message::Subdomains(entries))
             }
         }
         Action::SendRequest {

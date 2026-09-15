@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 pub mod findings;
 pub mod fuzzer;
 pub mod jobs;

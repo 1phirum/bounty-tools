@@ -1,9 +1,8 @@
 //! Native egui workstation. No webview, fixture telemetry, or animated controls.
-use crate::bridge::{Action, Bridge, Message, Snapshot};
-use eframe::egui::{self, Color32, RichText, TextEdit};
+use crate::bridge::{Action, Bridge, Message, Snapshot, SubdomainEntry};
+use eframe::egui::{self, Color32, RichText};
 use std::{
     path::PathBuf,
-    time::{Duration, Instant},
 };
 
 const CYAN: Color32 = Color32::from_rgb(44, 206, 219);
@@ -29,15 +28,11 @@ pub struct Workstation {
     
     // UI state
     status_modal: Option<(String, String)>,
-    compact: bool,
-    auto_refresh: bool,
-    last_refresh: Instant,
-    db_path: PathBuf,
     active_tab: Tab,
     
     // Subdomain Finder State
     pub target_domain: String,
-    pub subdomains: Vec<String>,
+    pub subdomains: Vec<SubdomainEntry>,
     
     // SQL Engine State
     pub sql_filter: String,
@@ -114,10 +109,7 @@ impl Workstation {
             status: "Ready".into(),
             error: None,
             status_modal: None,
-            compact: true,
-            auto_refresh: false,
-            last_refresh: Instant::now(),
-            db_path,
+
             active_tab: Tab::SubdomainFinder,
             
             target_domain: String::new(),
@@ -132,7 +124,6 @@ impl Workstation {
         self.status = "Working…".into();
         self.bridge.send(action);
         self.bridge.send(Action::Refresh);
-        self.last_refresh = Instant::now();
     }
     fn receive(&mut self) {
         while let Some(message) = self.bridge.try_recv() {
@@ -165,41 +156,35 @@ impl Workstation {
             }
         }
     }
-    fn heading(ui: &mut egui::Ui, title: &str, help: &str) {
-        ui.add_space(8.0);
-        ui.heading(RichText::new(title).size(23.0));
-        ui.label(RichText::new(help).color(MUTED));
-        ui.add_space(12.0);
-        ui.separator();
-        ui.add_space(10.0);
-    }
     
     fn subdomain_finder(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            ui.add_space(80.0);
-            
-            ui.heading(RichText::new("Subdomain Finder").size(48.0).color(CYAN));
-            ui.add_space(10.0);
-            ui.label(RichText::new("Map all known subdomains using Certificate Transparency logs.").color(MUTED));
-            
-            ui.add_space(40.0);
-            
-            ui.horizontal(|ui| {
-                let available_width = ui.available_width();
-                let search_bar_width = 600.0_f32.min(available_width);
-                ui.add_space((available_width - search_bar_width) / 2.0);
+        // Left side: Scan controls (fixed 300px)
+        egui::SidePanel::left("scan_panel")
+            .exact_width(300.0)
+            .resizable(false)
+            .show_inside(ui, |ui| {
+                ui.add_space(30.0);
+                ui.vertical_centered(|ui| {
+                    ui.heading(RichText::new("Subdomain Finder").size(24.0).color(CYAN));
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Certificate Transparency scan").color(MUTED));
+                });
                 
+                ui.add_space(20.0);
+                
+                ui.label(RichText::new("Target Domain").color(CYAN));
+                ui.add_space(4.0);
                 let res = ui.add(
                     egui::TextEdit::singleline(&mut self.target_domain)
                         .hint_text("example.com")
-                        .desired_width(search_bar_width - 160.0)
-                        .margin(egui::vec2(12.0, 12.0))
+                        .desired_width(f32::INFINITY)
+                        .margin(egui::vec2(8.0, 8.0))
                 );
                 
-                ui.add_space(10.0);
+                ui.add_space(12.0);
                 
                 if ui.add_sized(
-                    [150.0, 42.0],
+                    [ui.available_width(), 38.0],
                     egui::Button::new(RichText::new("Map Subdomains").color(Color32::from_rgb(10, 14, 22))).fill(CYAN)
                 ).clicked() || (res.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
                     let domain = self.target_domain.trim().to_string();
@@ -207,38 +192,86 @@ impl Workstation {
                         self.action(Action::MapSubdomains { target: domain });
                     }
                 }
-            });
-            
-            ui.add_space(40.0);
-            
-            if self.busy {
-                ui.spinner();
-                ui.add_space(10.0);
-                ui.label(RichText::new("Mapping...").color(CYAN));
-            }
-        });
-        
-        if !self.subdomains.is_empty() {
-            ui.add_space(20.0);
-            ui.horizontal(|ui| {
-                ui.add(egui::Image::new(egui::include_image!("../assets/chevron-down.svg")).tint(CYAN));
-                ui.heading(format!("Found {} subdomains", self.subdomains.len()));
-            });
-            ui.add_space(15.0);
-            
-            egui::ScrollArea::vertical().id_salt("results").max_height(400.0).show(ui, |ui| {
-                egui::Frame::group(ui.style()).inner_margin(16.0).show(ui, |ui| {
-                    for sub in &self.subdomains {
-                        ui.horizontal(|ui| {
-                            ui.add(egui::Image::new(egui::include_image!("../assets/recon.svg")).tint(MUTED).max_height(14.0));
-                            ui.add_space(8.0);
-                            ui.monospace(sub);
-                        });
-                        ui.separator();
+                
+                ui.add_space(16.0);
+                
+                if self.busy {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(RichText::new("Scanning...").color(CYAN));
+                    });
+                }
+                
+                if !self.subdomains.is_empty() && !self.busy {
+                    ui.label(RichText::new(format!("{} subdomains found", self.subdomains.len())).color(GREEN));
+                    
+                    ui.add_space(12.0);
+                    
+                    if ui.add_sized(
+                        [ui.available_width(), 34.0],
+                        egui::Button::new(RichText::new("Export JSON").color(Color32::from_rgb(10, 14, 22))).fill(CYAN)
+                    ).clicked() {
+                        if let Some(folder) = rfd::FileDialog::new()
+                            .set_title("Choose export folder")
+                            .pick_folder()
+                        {
+                            let domain = self.target_domain.trim().replace('.', "_");
+                            let json_path = folder.join(format!("{}_subdomains.json", domain));
+                            let json = serde_json::json!({
+                                "target": self.target_domain.trim(),
+                                "total": self.subdomains.len(),
+                                "subdomains": self.subdomains,
+                            });
+                            if let Ok(content) = serde_json::to_string_pretty(&json) {
+                                let _ = std::fs::write(&json_path, &content);
+                                self.status = format!("Exported to {}", json_path.display());
+                            }
+                        }
                     }
-                });
+                }
             });
-        }
+
+        // Right side: Results table (fills remaining space)
+        egui::Frame::none()
+            .inner_margin(egui::Margin { left: 24.0, right: 16.0, top: 24.0, bottom: 16.0 })
+            .show(ui, |ui| {
+                if self.subdomains.is_empty() && !self.busy {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(150.0);
+                        ui.label(RichText::new("No results yet").size(20.0).color(MUTED));
+                        ui.label(RichText::new("Enter a domain and scan.").color(MUTED));
+                    });
+                } else {
+                    egui_extras::TableBuilder::new(ui)
+                        .striped(true)
+                        .resizable(true)
+                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                        .column(egui_extras::Column::initial(40.0).at_least(30.0)) // ID
+                        .column(egui_extras::Column::initial(300.0).at_least(100.0).clip(true)) // Domain
+                        .column(egui_extras::Column::initial(150.0).at_least(80.0).clip(true)) // First Seen
+                        .column(egui_extras::Column::initial(200.0).at_least(100.0).clip(true)) // Issuer
+                        .column(egui_extras::Column::remainder().at_least(80.0).clip(true)) // Cert ID
+                        .min_scrolled_height(0.0)
+                        .header(28.0, |mut header| {
+                            header.col(|ui| { ui.label(RichText::new("ID").color(CYAN).strong()); });
+                            header.col(|ui| { ui.label(RichText::new("Domain").color(CYAN).strong()); });
+                            header.col(|ui| { ui.label(RichText::new("First Seen").color(CYAN).strong()); });
+                            header.col(|ui| { ui.label(RichText::new("Issuer").color(CYAN).strong()); });
+                            header.col(|ui| { ui.label(RichText::new("Cert ID").color(CYAN).strong()); });
+                        })
+                        .body(|mut body| {
+                            for (i, entry) in self.subdomains.iter().enumerate() {
+                                body.row(24.0, |mut row| {
+                                    row.col(|ui| { ui.label(RichText::new(format!("{}", i + 1)).color(MUTED).monospace()); });
+                                    row.col(|ui| { ui.monospace(&entry.domain); });
+                                    row.col(|ui| { ui.label(RichText::new(&entry.first_seen).color(MUTED)); });
+                                    row.col(|ui| { ui.label(RichText::new(&entry.issuer).color(MUTED)); });
+                                    row.col(|ui| { ui.label(RichText::new(format!("{}", entry.cert_id)).color(MUTED).monospace()); });
+                                });
+                            }
+                        });
+                }
+            });
     }
     
     fn sql_engine(&mut self, ui: &mut egui::Ui) {
@@ -273,7 +306,7 @@ impl Workstation {
                 let res = ui.add(
                     egui::TextEdit::singleline(&mut self.sql_filter)
                         .hint_text("Target URL with a query param (e.g. https://host/path?id=1) — Live Scan probes the first param")
-                        .desired_width(search_bar_width - 320.0)
+                        .desired_width(search_bar_width - 110.0)
                         .margin(egui::vec2(12.0, 12.0))
                 );
                 
@@ -290,20 +323,6 @@ impl Workstation {
                     // actual per-probe results.
                     self.sql_logs.clear();
                     self.action(Action::SqlSimulate { target: query.clone() });
-                }
-
-                if ui.add_sized(
-                    [100.0, 42.0],
-                    egui::Button::new(RichText::new("Clause Map").color(Color32::from_rgb(10, 14, 22))).fill(MUTED)
-                ).clicked() {
-                    self.action(Action::SqlClause { query: query.clone() });
-                }
-                
-                if ui.add_sized(
-                    [100.0, 42.0],
-                    egui::Button::new(RichText::new("Dialects").color(Color32::from_rgb(10, 14, 22))).fill(MUTED)
-                ).clicked() {
-                    self.action(Action::SqlDialect { query: query.clone() });
                 }
             });
         });
