@@ -2,6 +2,7 @@ use crate::clause_map::{self, SqlClause};
 use crate::detection::{self, DbmsDetectionResult, DbmsFamily};
 use bugtools_core::http::{HttpRequest, HttpResponse};
 use bugtools_scope::ScopeEngine;
+use bugtools_fingerprint::ResponseFingerprinter;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -54,7 +55,7 @@ pub enum ProbeType {
 pub struct DbmsProbeEngine {
     scope: Arc<ScopeEngine>,
     http: reqwest::Client,
-    fingerprinter: bugtools_fingerprint::ResponseFingerprinter,
+    fingerprinter: ResponseFingerprinter,
 }
 
 impl DbmsProbeEngine {
@@ -62,7 +63,7 @@ impl DbmsProbeEngine {
         Self {
             scope,
             http: reqwest::Client::new(),
-            fingerprinter: bugtools_fingerprint::ResponseFingerprinter::new(),
+            fingerprinter: ResponseFingerprinter::new(),
         }
     }
 
@@ -338,7 +339,7 @@ impl DbmsProbeEngine {
         let mut url = base.url.clone();
         // Replace the parameter value in the URL query string
         if let Ok(mut parsed) = url::Url::parse(&url) {
-            let mut pairs: Vec<(String, String)> = parsed.query_pairs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            let mut pairs: Vec<(String, String)> = parsed.query_pairs().map(|(k, v): (std::borrow::Cow<str>, std::borrow::Cow<str>)| (k.to_string(), v.to_string())).collect();
             for pair in &mut pairs {
                 if pair.0 == param_name {
                     pair.1 = payload.to_string();
@@ -360,7 +361,7 @@ impl DbmsProbeEngine {
     }
 
     /// Send a request and return the response.
-    async fn send(&self, req: &HttpRequest) -> Result<HttpResponse, reqwest::Error> {
+    async fn send(&self, req: &HttpRequest) -> Result<HttpResponse, ProbeError> {
         let builder = match req.method.to_uppercase().as_str() {
             "POST" => self.http.post(&req.url),
             "PUT" => self.http.put(&req.url),
@@ -374,7 +375,7 @@ impl DbmsProbeEngine {
             None => builder,
         };
 
-        let resp = builder.send().await?;
+        let resp = builder.send().await.map_err(ProbeError::Network)?;
         let status_code = resp.status().as_u16();
         let mut headers = HashMap::new();
         for (k, v) in resp.headers() {
