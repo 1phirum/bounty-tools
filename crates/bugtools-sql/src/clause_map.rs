@@ -1,6 +1,5 @@
 use crate::detection::DbmsFamily;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Every major SQL clause and its dialect-specific syntax variants.
 /// Each variant is annotated with the DBMS families that accept it.
@@ -72,7 +71,7 @@ pub struct ClauseVariant {
 /// The complete clause syntax map. Built once at startup; lookup is
 /// O(1) per clause.
 pub fn clause_map() -> &'static [SqlClauseMap] {
-    &CLAUSE_MAP
+    CLAUSE_MAP.as_slice()
 }
 
 /// All dialect-accepted variants for a given clause.
@@ -113,7 +112,7 @@ pub fn variants_accepted_by(dbms: DbmsFamily, clause: SqlClause) -> Vec<&'static
         .unwrap_or_default()
 }
 
-static CLAUSE_MAP: &[SqlClauseMap] = &[
+static CLAUSE_MAP: std::sync::LazyLock<Vec<SqlClauseMap>> = std::sync::LazyLock::new(|| vec![
     // ═══ SELECT ═══
     SqlClauseMap {
         clause: SqlClause::Select,
@@ -1044,7 +1043,7 @@ static CLAUSE_MAP: &[SqlClauseMap] = &[
             },
         ],
     },
-];
+]);
 
 /// Summary of clause coverage for a specific DBMS family.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1061,7 +1060,7 @@ pub fn coverage_report() -> Vec<DialectCoverage> {
     for &dbms in DbmsFamily::ALL {
         let mut accepted = 0;
         let mut rejected = 0;
-        for map in CLAUSE_MAP {
+        for map in CLAUSE_MAP.iter() {
             for variant in &map.variants {
                 if variant.accepted_by.contains(&dbms) {
                     accepted += 1;

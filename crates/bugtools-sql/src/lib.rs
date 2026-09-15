@@ -1,7 +1,7 @@
 use crate::clause_map::{self, SqlClause, SqlClauseMap};
 use crate::detection::{self, DbmsDetectionResult, DbmsFamily, DetectionSignal, DETECTION_SIGNALS};
+use crate::probe::{self, DbmsProbeEngine, ProbeError, ProbeResult};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::Path;
 use thiserror::Error;
 use uuid::Uuid;
@@ -10,9 +10,13 @@ pub mod clause_map;
 pub mod detection;
 pub mod probe;
 
-pub use clause_map::{ClauseVariant, SqlClause};
-pub use detection::{DbmsDetectionResult, DbmsFamily, DetectionVerdict, FiredSignal, SignalCategory};
-pub use probe::{AggregatedDetection, DbmsProbeEngine, ProbeResult, ProbeType};
+// Re-export types for external consumers (no local use conflict)
+pub use clause_map::ClauseVariant;
+pub use detection::{DetectionVerdict, FiredSignal, SignalCategory};
+pub use probe::{AggregatedDetection, ProbeType};
+
+// Re-export primary types for consumers
+
 
 #[derive(Debug, Error)]
 pub enum SqlEngineError {
@@ -218,7 +222,7 @@ pub fn compute_clause_coverage(dbms: DbmsFamily) -> Vec<ClauseCoverage> {
 /// Extract the path component from a URL string.
 fn extract_path(url: &str) -> String {
     url::Url::parse(url)
-        .map(|u| u.path().to_string())
+        .map(|u: url::Url| u.path().to_string())
         .unwrap_or_else(|_| url.to_string())
 }
 
