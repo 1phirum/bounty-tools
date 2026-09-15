@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 bugtools-core = { path = "../bugtools-core" }
 bugtools-fingerprint = { path = "../bugtools-fingerprint" }
+bugtools-scope = { path = "../bugtools-scope" }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }

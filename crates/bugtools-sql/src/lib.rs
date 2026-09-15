@@ -1,6 +1,5 @@
-use crate::clause_map::{self, SqlClause, SqlClauseMap};
-use crate::detection::{self, DbmsDetectionResult, DbmsFamily, DetectionSignal, DETECTION_SIGNALS};
-use crate::probe::{self, DbmsProbeEngine, ProbeError, ProbeResult};
+use crate::clause_map::SqlClause;
+use crate::detection::DbmsDetectionResult;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -12,8 +11,8 @@ pub mod probe;
 
 // Re-export types for external consumers (no local use conflict)
 pub use clause_map::ClauseVariant;
-pub use detection::{DetectionVerdict, FiredSignal, SignalCategory};
-pub use probe::{AggregatedDetection, ProbeType};
+pub use detection::{DbmsFamily, DetectionVerdict, FiredSignal, SignalCategory};
+pub use probe::{AggregatedDetection, DbmsProbeEngine, ProbeError, ProbeResult, ProbeType};
 
 // Re-export primary types for consumers
 

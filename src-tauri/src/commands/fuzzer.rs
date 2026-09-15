@@ -1,6 +1,6 @@
 use crate::state::AppState;
 use bugtools_http::{FuzzPosition, FuzzRunOptions, Fuzzer};
-use std::sync::Arc;
+
 use tauri::State;
 use uuid::Uuid;
 

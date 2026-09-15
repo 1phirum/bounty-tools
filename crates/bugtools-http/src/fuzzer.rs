@@ -15,7 +15,7 @@ pub enum FuzzerError {
     EmptyPayloadSet { marker: String },
     #[error("Expanded combos ({count}) exceed the per-run ceiling ({max})")]
     TooManyCombos { count: usize, max: usize },
-    #[error("Run aborted: {0} consecutive failures (ceiling {1})")]
+    #[error("Run aborted: {count} consecutive failures (ceiling {ceiling})")]
     TooManyFailures { count: usize, ceiling: usize },
 }
 
@@ -298,16 +298,18 @@ impl Fuzzer {
             let _ = handle.await;
         }
 
+        let final_results = match results.lock() {
+            Ok(r) => r.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+
         Ok(FuzzRunSummary {
             total: combos_len + completed.load(Ordering::SeqCst)
                 + failed.load(Ordering::SeqCst) + deduped.load(Ordering::SeqCst),
             completed: completed.load(Ordering::SeqCst),
             failed: failed.load(Ordering::SeqCst),
             deduped: deduped.load(Ordering::SeqCst),
-            results: match results.lock() {
-                Ok(r) => r.clone(),
-                Err(poisoned) => poisoned.into_inner().clone(),
-            },
+            results: final_results,
         })
     }
 }

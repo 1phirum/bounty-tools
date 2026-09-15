@@ -128,8 +128,9 @@ impl TrafficStore {
             // Full reindex after the shift. O(n) but amortized: runs once
             // per eviction, evictions happen only after capacity is hit.
             inner.index.clear();
-            for (i, e) in inner.entries.iter().enumerate() {
-                inner.index.insert(e.id, i);
+            for i in 0..inner.entries.len() {
+                let id = inner.entries[i].id;
+                inner.index.insert(id, i);
             }
         } else {
             let last = inner.entries.len() - 1;

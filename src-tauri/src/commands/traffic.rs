@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use bugtools_http::{Repeater, RepeaterEdit, SafeHttpClient, TokenBucket, TrafficStore};
+use bugtools_http::{Repeater, RepeaterEdit, SafeHttpClient, TrafficStore};
 use std::sync::Arc;
 use tauri::State;
 
@@ -79,7 +79,7 @@ pub async fn send_request(
     let fingerprint = TrafficStore::fingerprint_request(&req);    let entry_id = Uuid::new_v4();
     let stored = state.engines.store.append(bugtools_http::TrafficEntry {
         id: entry_id,
-        request: req,
+        request: req.clone(),
         response: Some(response.clone()),
         captured_at: Utc::now(),
         fingerprint: fingerprint.clone(),

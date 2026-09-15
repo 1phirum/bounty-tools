@@ -2,6 +2,7 @@ use crate::clause_map::{self, SqlClause};
 use crate::detection::{self, DbmsDetectionResult, DbmsFamily};
 use bugtools_core::http::{HttpRequest, HttpResponse};
 use bugtools_scope::ScopeEngine;
+use serde::Serialize;
 use bugtools_fingerprint::ResponseFingerprinter;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -138,7 +139,7 @@ impl DbmsProbeEngine {
         base: &HttpRequest,
         param_name: &str,
         _param_value: &str,
-        baseline: &ProbeResult,
+        _baseline: &ProbeResult,
     ) -> Result<Vec<ProbeResult>, ProbeError> {
         let mut results = Vec::new();
 

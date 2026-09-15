@@ -1,7 +1,7 @@
 use crate::state::AppState;
 use bugtools_core::http::HttpRequest;
 use bugtools_sql::{analyze_endpoint, clause_map, DbmsProbeEngine, SqlAnalysisResult};
-use std::sync::Arc;
+
 use tauri::State;
 use uuid::Uuid;
 
@@ -51,7 +51,7 @@ pub async fn sql_analyze_endpoint(
 #[tauri::command]
 pub async fn sql_get_clause_map(
     dbms: Option<String>,
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let maps = clause_map::clause_map();
 
@@ -77,7 +77,7 @@ pub async fn sql_get_clause_map(
 pub async fn sql_get_dialect_variants(
     clause: String,
     dbms: String,
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let clause_enum = parse_clause(&clause).ok_or_else(|| format!("Unknown clause: {}", clause))?;
     let family = parse_dbms(&dbms).ok_or_else(|| format!("Unknown DBMS: {}", dbms))?;

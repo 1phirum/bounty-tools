@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
+use reqwest::Client;
 
 pub mod fuzzer;
 pub mod rate_limiter;
@@ -144,7 +145,7 @@ impl SafeHttpClient {
             builder = builder.body(body.clone());
         }
 
-        let resp = builder.send().await?;
+        let resp: reqwest::Response = builder.send().await?;
         let duration_ms = start_time.elapsed().as_millis() as u64;
         let status_code = resp.status().as_u16();
 
