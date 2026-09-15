@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "src-tauri",
+    "apps/gui",
     "crates/bugtools-core",
     "crates/bugtools-scope",
     "crates/bugtools-storage",
@@ -33,5 +33,5 @@ sha2 = "0.10"
 toml = "0.8"
 tracing = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies"] }
-tauri = { version = "2.1", features = [] }
-tauri-build = { version = "2.0" }
+eframe = "0.29"
+egui = "0.29"

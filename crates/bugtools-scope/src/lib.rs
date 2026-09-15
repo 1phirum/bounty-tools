@@ -1,4 +1,4 @@
-use bugtools_core::scope::{ScopeEvaluation, ScopeRule, ScopeRuleType};
+use bugtools_core::scope::{ScopeEvaluation, ScopeRule};
 use std::sync::RwLock;
 use thiserror::Error;
 use url::Url;
@@ -59,6 +59,7 @@ impl ScopeEngine {
         }
     }
 
+    #[allow(dead_code)]
     fn domain_matches(&self, host: &str, pattern: &str) -> bool {
         let host = host.to_lowercase();
         let pattern = pattern.to_lowercase();
@@ -71,6 +72,7 @@ impl ScopeEngine {
         }
     }
 
+    #[allow(dead_code)]
     fn parse_target(&self, target_input: &str) -> Result<(String, String, u16, String), ScopeError> {
         let target_str = if !target_input.contains("://") {
             format!("https://{}", target_input)
@@ -102,6 +104,7 @@ impl ScopeEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bugtools_core::scope::ScopeRuleType;
     use uuid::Uuid;
 
     #[test]

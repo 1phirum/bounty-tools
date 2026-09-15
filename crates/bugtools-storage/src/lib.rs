@@ -29,11 +29,14 @@ pub struct Database {
 
 impl Database {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, StorageError> {
+        eprintln!("  -> Connection::open...");
         let conn = Connection::open(path)?;
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
+        eprintln!("  -> db.init_schema()...");
         db.init_schema()?;
+        eprintln!("  -> Database ready.");
         Ok(db)
     }
 
@@ -51,7 +54,6 @@ impl Database {
         conn.execute_batch(
             r#"
             PRAGMA foreign_keys = ON;
-            PRAGMA journal_mode = WAL;
 
             CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY,
