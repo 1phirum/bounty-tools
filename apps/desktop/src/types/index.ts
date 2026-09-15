@@ -149,3 +149,9 @@ export interface SystemInfo {
   ram_usage_percent: number;
   datetime: string;
 }
+
+export interface Settings {
+  max_requests_per_second: number;
+  max_worker_concurrency: number;
+  max_requests_per_job: number;
+}

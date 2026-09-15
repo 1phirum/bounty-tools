@@ -155,9 +155,7 @@ export const App: React.FC = () => {
 
   const handleCancelJob = async (jobId: string) => {
     await api.cancelJob(jobId);
-    setJobs((prev) =>
-      prev.map((j) => (j.id === jobId ? { ...j, status: 'CANCELLED' } : j))
-    );
+    setJobs((prev) => prev.filter((j) => j.id !== jobId));
   };
 
   const activeProject = projects.find((p) => p.id === activeProjectId) || null;

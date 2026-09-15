@@ -1,0 +1,39 @@
+syntax = "proto3";
+package bugtools.v1;
+option go_package = "bugtools/http-go/internal/proto";
+
+service Coordinator {
+    // Control Plane: Rust sends jobs to Go, Go executes and streams back observations
+    rpc ExecuteHttpJob (RequestJob) returns (stream RequestObservation) {}
+}
+
+message RequestJob {
+    string job_id = 1;
+    string target_id = 2;
+    string method = 3;
+    string url = 4;
+    map<string, string> headers = 5;
+    bytes body = 6;
+}
+
+message RequestObservation {
+    string job_id = 1;
+    string observation_id = 2;
+    uint32 status = 3;
+    map<string, string> headers = 4;
+    bytes body = 5;
+    uint64 elapsed_ms = 6;
+    uint64 timestamp_unix_ms = 7;
+}
+
+// Common Event Envelope for the Event Bus
+message EventEnvelope {
+    string event_id = 1;
+    string job_id = 2;
+    string worker_id = 3;
+    string engine = 4;
+    string engine_version = 5;
+    uint64 timestamp_unix_ms = 6;
+    string event_type = 7; // e.g., "HTTP_OBSERVATION", "DNS_OBSERVATION"
+    bytes payload = 8;
+}

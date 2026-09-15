@@ -1,6 +1,8 @@
 use bugtools_core::events::BugToolsEvent;
 use tokio::sync::broadcast;
 
+pub mod grpc;
+
 #[derive(Clone)]
 pub struct EventBus {
     sender: broadcast::Sender<BugToolsEvent>,

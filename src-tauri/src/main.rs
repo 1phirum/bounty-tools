@@ -58,6 +58,8 @@ fn main() {
             commands::sql_research::sql_get_clause_map,
             commands::sql_research::sql_get_dialect_variants,
             commands::system::get_system_info,
+            commands::settings::get_settings,
+            commands::settings::update_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

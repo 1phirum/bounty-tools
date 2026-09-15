@@ -323,6 +323,25 @@ export const api = {
     };
   },
 
+  async getSettings(): Promise<any> {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return invoke('get_settings');
+    }
+    return {
+      max_requests_per_second: 5.0,
+      max_worker_concurrency: 4,
+      max_requests_per_job: 1000,
+    };
+  },
+
+  async updateSettings(settings: any): Promise<void> {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return invoke('update_settings', { settings });
+    }
+  },
+
   async createFinding(payload: {
     projectId: string;
     title: string;

@@ -1,13 +1,30 @@
-import React, { useState } from 'react';
-import { Settings as SettingsIcon, Sliders, Save } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Settings as SettingsIcon, Sliders, Save, RefreshCw } from 'lucide-react';
+import { api } from '../../api/tauri';
+import { Settings as SettingsType } from '../../types';
 
 export const Settings: React.FC = () => {
   const [rps, setRps] = useState('5.0');
   const [concurrency, setConcurrency] = useState('4');
   const [budget, setBudget] = useState('1000');
   const [saved, setSaved] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  const handleSave = () => {
+  useEffect(() => {
+    api.getSettings().then((s: SettingsType) => {
+      setRps(s.max_requests_per_second.toString());
+      setConcurrency(s.max_worker_concurrency.toString());
+      setBudget(s.max_requests_per_job.toString());
+      setLoading(false);
+    });
+  }, []);
+
+  const handleSave = async () => {
+    await api.updateSettings({
+      max_requests_per_second: parseFloat(rps) || 5.0,
+      max_worker_concurrency: parseInt(concurrency) || 4,
+      max_requests_per_job: parseInt(budget) || 1000,
+    });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -68,9 +85,10 @@ export const Settings: React.FC = () => {
           </span>
           <button
             onClick={handleSave}
-            className="px-5 py-2.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs font-mono uppercase tracking-wider transition flex items-center gap-2 cursor-pointer"
+            disabled={loading}
+            className="px-5 py-2.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 active:bg-cyan-600 text-slate-950 font-bold text-xs font-mono uppercase tracking-wider transition flex items-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <Save className="w-4 h-4" />
+            {loading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
             <span>{saved ? 'Saved!' : 'Save Limits'}</span>
           </button>
         </div>

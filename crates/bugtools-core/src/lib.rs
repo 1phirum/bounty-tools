@@ -5,7 +5,9 @@ pub mod http;
 pub mod job;
 pub mod project;
 pub mod scope;
+pub mod settings;
 pub mod target;
+pub mod scheduling;
 
 use thiserror::Error;
 

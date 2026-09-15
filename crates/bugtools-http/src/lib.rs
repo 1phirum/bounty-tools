@@ -14,6 +14,7 @@ pub mod fuzzer;
 pub mod rate_limiter;
 pub mod repeater;
 pub mod traffic;
+pub mod profile;
 
 pub use rate_limiter::TokenBucket;
 pub use repeater::{Repeater, RepeaterEdit, RepeaterError};

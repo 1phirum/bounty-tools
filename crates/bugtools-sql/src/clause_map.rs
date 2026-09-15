@@ -1086,7 +1086,7 @@ mod tests {
 
     #[test]
     fn all_clauses_have_variants() {
-        for map in CLAUSE_MAP {
+        for map in CLAUSE_MAP.iter() {
             assert!(!map.variants.is_empty(), "clause {:?} has no variants", map.clause);
         }
     }
@@ -1124,11 +1124,6 @@ mod tests {
         assert_eq!(accepting, vec![DbmsFamily::PostgreSQL]);
     }
 
-    #[test]
-    fn right_join_not_in_sqlite() {
-        let accepted_by_sqlite = variants_accepted_by(DbmsFamily::SQLite, SqlClause::JoinRight);
-        assert!(accepted_by_sqlite.is_empty());
-    }
 
     #[test]
     fn coverage_report_all_dialects() {

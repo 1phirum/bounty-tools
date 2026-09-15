@@ -31,7 +31,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
 }) => {
   const [quickTarget, setQuickTarget] = useState('https://api.targetalpha.com/v1/search');
   const [quickModule, setQuickModule] = useState('sql_injection');
+  const [isRawMode, setIsRawMode] = useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number, y: number, jobId: string } | null>(null);
 
   const MODULE_OPTIONS = [
     { value: "sql_injection", label: "SQL Research Engine (Differential)" },
@@ -41,7 +43,33 @@ export const Dashboard: React.FC<DashboardProps> = ({
   ];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative">
+      {/* Context Menu Overlay */}
+      {contextMenu && (
+        <div 
+          className="fixed inset-0 z-50"
+          onClick={() => setContextMenu(null)}
+          onContextMenu={(e) => { e.preventDefault(); setContextMenu(null); }}
+        >
+          <div 
+            className="absolute bg-[#0a0d13] border border-[#2c3850] rounded-lg shadow-2xl py-1 z-50 w-36 overflow-hidden"
+            style={{ top: contextMenu.y, left: contextMenu.x }}
+          >
+            <button 
+              className="w-full text-left px-3 py-2 text-xs font-mono text-red-400 flex items-center gap-2 transition-colors cursor-pointer"
+              onClick={(e) => {
+                e.stopPropagation();
+                onCancelJob(contextMenu.jobId);
+                setContextMenu(null);
+              }}
+            >
+              <XCircle className="w-3.5 h-3.5" />
+              Delete Job
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Top Banner */}
       <div className="flex items-center justify-between">
         <div>
@@ -120,11 +148,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 No active jobs. Launch a test scan using the control panel on the right.
               </div>
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-3 max-h-[300px] overflow-y-auto [&::-webkit-scrollbar]:hidden" style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}>
                 {jobs.map((job) => (
                   <div
                     key={job.id}
-                    className="p-4 rounded-lg bg-[#161d2d] border border-[#2c3850] space-y-2.5"
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setContextMenu({ x: e.pageX, y: e.pageY, jobId: job.id });
+                    }}
+                    className="p-4 rounded-lg bg-[#161d2d] border border-[#2c3850] space-y-2.5 cursor-context-menu hover:border-slate-500/50 transition-colors"
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
@@ -195,14 +227,39 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
             <div className="space-y-3">
               <div>
-                <label className="block text-xs font-mono text-slate-400 mb-1">Target URL / Host</label>
-                <input
-                  type="text"
-                  value={quickTarget}
-                  onChange={(e) => setQuickTarget(e.target.value)}
-                  className="w-full bg-[#0a0d13] border border-[#1e2638] focus:border-cyan-400 rounded-lg px-3 py-2 text-xs font-mono text-white outline-none"
-                  placeholder="https://example.com"
-                />
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-mono text-slate-400">Target Configuration</label>
+                  <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={isRawMode}
+                      onChange={(e) => setIsRawMode(e.target.checked)}
+                      className="sr-only"
+                    />
+                    <div className={`w-3 h-3 rounded flex items-center justify-center transition-all ${
+                      isRawMode ? 'bg-cyan-500 text-[#090d16]' : 'bg-[#1a2540] text-transparent'
+                    }`}>
+                      <CheckCircle2 className="w-2.5 h-2.5" />
+                    </div>
+                    <span className="text-[10px] font-mono text-slate-400 uppercase tracking-wider">Raw Request Mode</span>
+                  </label>
+                </div>
+                {isRawMode ? (
+                  <textarea
+                    value={quickTarget}
+                    onChange={(e) => setQuickTarget(e.target.value)}
+                    className="w-full h-32 bg-[#0a0d13] border border-[#1e2638] focus:border-cyan-400 rounded-lg px-3 py-2 text-xs font-mono text-white outline-none resize-none whitespace-pre"
+                    placeholder={"POST /api/search HTTP/1.1\nHost: example.com\nContent-Type: application/json\n\n{\"query\": \"*\"}"}
+                  />
+                ) : (
+                  <input
+                    type="text"
+                    value={quickTarget}
+                    onChange={(e) => setQuickTarget(e.target.value)}
+                    className="w-full bg-[#0a0d13] border border-[#1e2638] focus:border-cyan-400 rounded-lg px-3 py-2 text-xs font-mono text-white outline-none"
+                    placeholder="https://example.com"
+                  />
+                )}
               </div>
 
               <div>

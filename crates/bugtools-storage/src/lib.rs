@@ -3,6 +3,7 @@ use bugtools_core::{
     job::{Job, JobStatus, ModuleType},
     project::Project,
     scope::{ScopeRule, ScopeRuleType},
+    settings::Settings,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
@@ -121,7 +122,64 @@ impl Database {
                 component TEXT NOT NULL,
                 message TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                max_requests_per_second REAL NOT NULL,
+                max_worker_concurrency INTEGER NOT NULL,
+                max_requests_per_job INTEGER NOT NULL
+            );
             "#,
+        )?;
+        // Insert default settings if they don't exist
+        self.init_default_settings()?;
+        Ok(())
+    }
+
+    fn init_default_settings(&self) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let default_settings = Settings::default();
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (id, max_requests_per_second, max_worker_concurrency, max_requests_per_job) VALUES (1, ?1, ?2, ?3)",
+            params![
+                default_settings.max_requests_per_second as f64,
+                default_settings.max_worker_concurrency as i64,
+                default_settings.max_requests_per_job as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    // --- Settings CRUD ---
+
+    pub fn get_settings(&self) -> Result<Settings, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT max_requests_per_second, max_worker_concurrency, max_requests_per_job FROM settings WHERE id = 1")?;
+        let mut rows = stmt.query([])?;
+        
+        if let Some(row) = rows.next()? {
+            let rps: f64 = row.get(0)?;
+            let conc: i64 = row.get(1)?;
+            let max_req: i64 = row.get(2)?;
+            Ok(Settings {
+                max_requests_per_second: rps as f32,
+                max_worker_concurrency: conc as usize,
+                max_requests_per_job: max_req as usize,
+            })
+        } else {
+            Ok(Settings::default())
+        }
+    }
+
+    pub fn update_settings(&self, settings: &Settings) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE settings SET max_requests_per_second = ?1, max_worker_concurrency = ?2, max_requests_per_job = ?3 WHERE id = 1",
+            params![
+                settings.max_requests_per_second as f64,
+                settings.max_worker_concurrency as i64,
+                settings.max_requests_per_job as i64,
+            ],
         )?;
         Ok(())
     }

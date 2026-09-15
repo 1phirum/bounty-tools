@@ -16,6 +16,7 @@ interface SqlPageProps {
 
 export const SqlPage: React.FC<SqlPageProps> = ({ activeProjectId, onTriggerTestJob }) => {
   const [target, setTarget] = useState('');
+  const [isRawMode, setIsRawMode] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -83,13 +84,40 @@ export const SqlPage: React.FC<SqlPageProps> = ({ activeProjectId, onTriggerTest
             </h3>
 
             <div>
-              <label className="block text-[11px] font-mono text-slate-400 mb-1">Target Endpoint</label>
-              <input
-                type="text"
-                value={target}
-                onChange={(e) => setTarget(e.target.value)}
-                className="w-full bg-[#090d16] border border-[#1a2540] focus:border-cyan-400 rounded px-3 py-1.5 text-xs font-mono text-white outline-none"
-              />
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-[11px] font-mono text-slate-400">Target Configuration</label>
+                <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={isRawMode}
+                    onChange={(e) => setIsRawMode(e.target.checked)}
+                    className="sr-only"
+                  />
+                  <div className={`w-3 h-3 rounded flex items-center justify-center transition-all ${
+                    isRawMode ? 'bg-cyan-500 text-[#090d16]' : 'bg-[#1a2540] text-transparent'
+                  }`}>
+                    <Check className="w-2.5 h-2.5" strokeWidth={3} />
+                  </div>
+                  <span className="text-[10px] font-mono text-slate-400 uppercase tracking-wider">Raw Request Mode</span>
+                </label>
+              </div>
+              
+              {isRawMode ? (
+                <textarea
+                  value={target}
+                  onChange={(e) => setTarget(e.target.value)}
+                  className="w-full h-40 bg-[#090d16] border border-[#1a2540] focus:border-cyan-400 rounded px-3 py-2 text-xs font-mono text-white outline-none resize-none whitespace-pre"
+                  placeholder={"POST /api/search HTTP/1.1\nHost: example.com\nContent-Type: application/json\n\n{\"query\": \"*\"}"}
+                />
+              ) : (
+                <input
+                  type="text"
+                  value={target}
+                  onChange={(e) => setTarget(e.target.value)}
+                  className="w-full bg-[#090d16] border border-[#1a2540] focus:border-cyan-400 rounded px-3 py-1.5 text-xs font-mono text-white outline-none"
+                  placeholder="https://example.com/api?id=1"
+                />
+              )}
             </div>
           </div>
 

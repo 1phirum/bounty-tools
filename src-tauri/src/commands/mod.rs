@@ -6,3 +6,4 @@ pub mod scope;
 pub mod sql_research;
 pub mod traffic;
 pub mod system;
+pub mod settings;
