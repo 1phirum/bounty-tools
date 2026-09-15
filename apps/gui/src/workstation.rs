@@ -1,5 +1,5 @@
 //! Native egui workstation. No webview, fixture telemetry, or animated controls.
-use crate::bridge::{Action, Bridge, Message, Snapshot, SubdomainEntry};
+use crate::bridge::{Action, Bridge, Message, ScanResultView, Snapshot, SubdomainEntry};
 use eframe::egui::{self, Color32, RichText};
 use std::{
     path::PathBuf,
@@ -37,6 +37,14 @@ pub struct Workstation {
     // SQL Engine State
     pub sql_filter: String,
     pub sql_logs: Vec<String>,
+    /// Latest completed scan, rendered by the dashboard panels.
+    pub last_scan: Option<ScanResultView>,
+    /// Rolling history of completed scans for the history table.
+    pub scan_history: Vec<ScanResultView>,
+    /// Live-activity level filter (ALL / INFO / TEST / MATCH / ERROR).
+    pub log_filter: String,
+    /// HTTP method for the target request panel.
+    pub sql_method: String,
 }
 
 pub fn configure(ctx: &egui::Context, compact: bool) {
@@ -116,6 +124,10 @@ impl Workstation {
             subdomains: Vec::new(),
             sql_filter: String::new(),
             sql_logs: Vec::new(),
+            last_scan: None,
+            scan_history: Vec::new(),
+            log_filter: "ALL".into(),
+            sql_method: "GET".into(),
         }
     }
     fn action(&mut self, action: Action) {
@@ -147,6 +159,12 @@ impl Workstation {
                 }
                 Message::LiveLog(log) => {
                     self.sql_logs.push(log);
+                }
+                Message::ScanComplete(view) => {
+                    self.last_scan = Some(*view.clone());
+                    self.scan_history.insert(0, *view);
+                    self.busy = false;
+                    self.status = "Scan complete".into();
                 }
                 Message::Error(error) => {
                     self.busy = false;
@@ -275,57 +293,261 @@ impl Workstation {
     }
     
     fn sql_engine(&mut self, ui: &mut egui::Ui) {
+        // ── Right rail: Live Activity with level filters ─────────────────
         egui::SidePanel::right("sql_logs")
-            .min_width(350.0)
+            .min_width(320.0)
             .show_inside(ui, |ui| {
-                ui.heading(RichText::new("Live Logs").color(CYAN));
+                ui.heading(RichText::new("Live Activity").color(CYAN));
+                ui.horizontal_wrapped(|ui| {
+                    for level in ["ALL", "INFO", "TEST", "MATCH", "ERROR"] {
+                        let selected = self.log_filter == level;
+                        if ui.selectable_label(selected, level).clicked() {
+                            self.log_filter = level.into();
+                        }
+                    }
+                });
                 ui.separator();
                 egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-                    if self.sql_logs.is_empty() {
+                    let filter = self.log_filter.clone();
+                    let shown: Vec<&String> = self
+                        .sql_logs
+                        .iter()
+                        .filter(|l| {
+                            filter == "ALL"
+                                || match filter.as_str() {
+                                    "MATCH" => l.contains("[signal]") || l.contains("MATCH"),
+                                    "TEST" => l.contains("[*]") || l.contains("TEST") || l.contains("Probing"),
+                                    "INFO" => l.contains("[+]") || l.contains("INFO"),
+                                    "ERROR" => l.contains("ERROR") || l.contains("denied"),
+                                    _ => true,
+                                }
+                        })
+                        .collect();
+                    if shown.is_empty() {
                         ui.label(RichText::new("No active scan. Waiting for target...").color(MUTED));
                     }
-                    for log in &self.sql_logs {
+                    for log in shown {
                         ui.monospace(log);
                     }
                 });
             });
 
-        ui.vertical_centered(|ui| {
-            ui.add_space(80.0);
-            ui.heading(RichText::new("SQL Engine").size(48.0).color(CYAN));
-            ui.add_space(10.0);
-            ui.label(RichText::new("Automated SQL scanner and reference").color(MUTED));
-            
-            ui.add_space(40.0);
-            
+        // ── Target Request panel ─────────────────────────────────────────
+        ui.add_space(6.0);
+        ui.heading(RichText::new("SQL Engine").size(28.0).color(CYAN));
+        ui.label(RichText::new("Scope-checked DBMS detection with clause coverage and explainable confidence.").color(MUTED));
+        ui.add_space(10.0);
+
+        egui::Frame::group(ui.style()).inner_margin(14.0).show(ui, |ui| {
+            ui.label(RichText::new("TARGET REQUEST").small().color(MUTED));
             ui.horizontal(|ui| {
-                let available_width = ui.available_width();
-                let search_bar_width = 700.0_f32.min(available_width);
-                ui.add_space((available_width - search_bar_width) / 2.0);
-                
-                let res = ui.add(
+                egui::ComboBox::from_id_salt("sql_method")
+                    .selected_text(&self.sql_method)
+                    .show_ui(ui, |ui| {
+                        for m in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] {
+                            ui.selectable_value(&mut self.sql_method, m.into(), m);
+                        }
+                    });
+                ui.add(
                     egui::TextEdit::singleline(&mut self.sql_filter)
-                        .hint_text("Target URL with a query param (e.g. https://host/path?id=1) — Live Scan probes the first param")
-                        .desired_width(search_bar_width - 110.0)
+                        .hint_text("https://host/path?id=42")
+                        .desired_width(ui.available_width() - 120.0)
                         .margin(egui::vec2(12.0, 12.0))
+                        .font(egui::TextStyle::Monospace),
                 );
-                
-                ui.add_space(10.0);
-                
-                let query = self.sql_filter.to_lowercase();
-                
-                if ui.add_sized(
-                    [100.0, 42.0],
-                    egui::Button::new(RichText::new("Live Scan").color(Color32::from_rgb(10, 14, 22))).fill(CYAN)
-                ).clicked() || (res.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
-                    // Live Scan runs the real, scope-checked DBMS probe
-                    // pipeline. No output is fabricated — logs come from the
-                    // actual per-probe results.
+            });
+        });
+        ui.add_space(8.0);
+
+        // ── Parameters discovered from the target URL ────────────────────
+        let params = parse_query_params(&self.sql_filter);
+        egui::Frame::group(ui.style()).inner_margin(14.0).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("PARAMETERS").small().color(MUTED));
+                ui.add_space(8.0);
+                ui.label(RichText::new(format!("{} detected", params.len())).small().color(CYAN));
+            });
+            if params.is_empty() {
+                ui.label(RichText::new("No query parameters. Add ?id=42 (the scan probes the first, or injects a marker).").color(MUTED));
+            } else {
+                egui::Grid::new("params_grid").num_columns(3).striped(true).show(ui, |ui| {
+                    ui.strong("Parameter");
+                    ui.strong("Value");
+                    ui.strong("Context");
+                    ui.end_row();
+                    for (name, value) in &params {
+                        ui.monospace(name);
+                        ui.monospace(value);
+                        ui.label(RichText::new(infer_context(value)).color(MUTED));
+                        ui.end_row();
+                    }
+                });
+            }
+        });
+        ui.add_space(8.0);
+
+        // ── Two-column body: Scan Control | Database Intelligence ────────
+        ui.columns(2, |cols| {
+            // Scan Control
+            egui::Frame::group(cols[0].style()).inner_margin(14.0).show(&mut cols[0], |ui| {
+                ui.label(RichText::new("SCAN CONTROL").small().color(MUTED));
+                ui.add_space(6.0);
+                let state_label = if self.busy { "● RUNNING" } else { "● IDLE" };
+                ui.label(RichText::new(state_label).color(if self.busy { AMBER } else { GREEN }));
+                ui.add_space(6.0);
+                let can_scan = !self.busy && !self.sql_filter.trim().is_empty();
+                if ui.add_enabled(can_scan, egui::Button::new(RichText::new("▶ START SCAN").color(Color32::from_rgb(10,14,22)).size(15.0)).fill(CYAN).min_size(egui::vec2(ui.available_width(), 38.0))).clicked() {
                     self.sql_logs.clear();
-                    self.action(Action::SqlSimulate { target: query.clone() });
+                    self.action(Action::SqlSimulate { target: self.sql_filter.trim().to_lowercase() });
+                }
+                ui.add_space(4.0);
+                if let Some(scan) = &self.last_scan {
+                    ui.label(RichText::new(format!("{} probes · {} techniques", scan.probes_run, scan.techniques_tested.len())).small().color(MUTED));
+                }
+            });
+            // Database Intelligence
+            egui::Frame::group(cols[1].style()).inner_margin(14.0).show(&mut cols[1], |ui| {
+                ui.label(RichText::new("DATABASE INTELLIGENCE").small().color(MUTED));
+                ui.add_space(6.0);
+                match &self.last_scan {
+                    None => { ui.label(RichText::new("No scan yet. Run a scan to identify the DBMS.").color(MUTED)); }
+                    Some(scan) => {
+                        ui.label(RichText::new(&scan.dbms_label).size(20.0).color(CYAN));
+                        let frac = scan.confidence as f32 / 100.0;
+                        ui.add(egui::ProgressBar::new(frac).text(format!("Confidence {}%", scan.confidence)).fill(CYAN));
+                        ui.add_space(4.0);
+                        if !scan.alternatives.is_empty() {
+                            ui.label(RichText::new("Alternatives").small().color(MUTED));
+                            for (name, score) in &scan.alternatives {
+                                ui.monospace(format!("{}  {}%", name, score));
+                            }
+                        }
+                        if scan.confidence > 0 {
+                            ui.label(RichText::new(format!("Injection signal: {}", scan.verdict)).small().color(AMBER));
+                        }
+                    }
                 }
             });
         });
+        ui.add_space(8.0);
+
+        // ── Two-column body: Clause Coverage | Signal Explorer ───────────
+        ui.columns(2, |cols| {
+            egui::Frame::group(cols[0].style()).inner_margin(14.0).show(&mut cols[0], |ui| {
+                ui.label(RichText::new("CLAUSE COVERAGE").small().color(MUTED));
+                ui.add_space(6.0);
+                match &self.last_scan {
+                    None => { ui.label(RichText::new("Coverage appears after a DBMS is identified.").color(MUTED)); }
+                    Some(scan) if scan.clause_coverage.is_empty() => {
+                        ui.label(RichText::new("Coverage unavailable until a DBMS is identified.").color(MUTED));
+                    }
+                    Some(scan) => {
+                        egui::Grid::new("clause_grid").num_columns(4).striped(true).show(ui, |ui| {
+                            for chunk in scan.clause_coverage.chunks(2) {
+                                for (clause, accepted) in chunk {
+                                    let (icon, color) = if *accepted { ("✓", GREEN) } else { ("✕", RED) };
+                                    ui.label(RichText::new(format!("{} {}", clause, icon)).color(color));
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    }
+                }
+            });
+            egui::Frame::group(cols[1].style()).inner_margin(14.0).show(&mut cols[1], |ui| {
+                ui.label(RichText::new("SIGNAL EXPLORER").small().color(MUTED));
+                ui.add_space(6.0);
+                match &self.last_scan {
+                    None => { ui.label(RichText::new("Matched signatures appear here — why the engine reached its confidence.").color(MUTED)); }
+                    Some(scan) if scan.signals.is_empty() => {
+                        ui.label(RichText::new("No DBMS-specific signatures matched.").color(MUTED));
+                    }
+                    Some(scan) => {
+                        egui::ScrollArea::vertical().id_salt("signals").max_height(180.0).show(ui, |ui| {
+                            for (label, dbms, weight, category) in &scan.signals {
+                                egui::Frame::group(ui.style()).inner_margin(8.0).show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.monospace(label);
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            ui.label(RichText::new(format!("+{}", weight)).color(CYAN));
+                                        });
+                                    });
+                                    ui.label(RichText::new(format!("{} · {}", dbms, category)).small().color(MUTED));
+                                });
+                            }
+                        });
+                    }
+                }
+            });
+        });
+        ui.add_space(8.0);
+
+        // ── Scan History ─────────────────────────────────────────────────
+        if !self.scan_history.is_empty() {
+            egui::Frame::group(ui.style()).inner_margin(14.0).show(ui, |ui| {
+                ui.label(RichText::new("SCAN HISTORY").small().color(MUTED));
+                egui::Grid::new("history_grid").num_columns(4).striped(true).show(ui, |ui| {
+                    ui.strong("Target"); ui.strong("Param"); ui.strong("DBMS"); ui.strong("Confidence");
+                    ui.end_row();
+                    for scan in self.scan_history.iter().take(10) {
+                        ui.monospace(truncate(&scan.target, 34));
+                        ui.monospace(&scan.parameter);
+                        ui.label(&scan.dbms_label);
+                        ui.monospace(format!("{}%", scan.confidence));
+                        ui.end_row();
+                    }
+                });
+            });
+        }
+
+        // ── Scan summary bar ─────────────────────────────────────────────
+        if let Some(scan) = &self.last_scan {
+            ui.add_space(6.0);
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                ui.monospace(format!("PROBES {}", scan.probes_run));
+                ui.separator();
+                ui.monospace(format!("CONFIDENCE {}%", scan.confidence));
+                ui.separator();
+                ui.monospace(format!("DBMS {}", scan.dbms_label.to_uppercase()));
+                ui.separator();
+                ui.monospace(format!("VERDICT {}", scan.verdict.to_uppercase()));
+            });
+        }
+    }
+}
+
+/// Extract (name, value) query pairs from a URL for the parameter table.
+fn parse_query_params(url: &str) -> Vec<(String, String)> {
+    url::Url::parse(url.trim())
+        .ok()
+        .map(|u| {
+            u.query_pairs()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Infer the SQL injection context from a parameter's value (numeric vs
+/// string). Shown in the parameter table — maps to the engine's SqlContext.
+fn infer_context(value: &str) -> &'static str {
+    if value.chars().all(|c| c.is_ascii_digit()) && !value.is_empty() {
+        "Numeric"
+    } else if value.is_empty() {
+        "Unknown"
+    } else {
+        "String"
+    }
+}
+
+/// Truncate a string for table display.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let t: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{}…", t)
     }
 }
 

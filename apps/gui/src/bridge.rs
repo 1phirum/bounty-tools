@@ -100,7 +100,31 @@ pub enum Message {
     Output { title: String, text: String },
     Subdomains(Vec<SubdomainEntry>),
     LiveLog(String),
+    /// A completed SQL detection scan, carrying the full structured result
+    /// for the dashboard panels (DBMS intelligence, signals, coverage).
+    ScanComplete(Box<ScanResultView>),
     Error(String),
+}
+
+/// UI-facing, serializable projection of the SQL analysis result.
+/// Built from the real engine output — every field is backed by an
+/// actual probe; nothing is fabricated for display.
+#[derive(Debug, Clone)]
+pub struct ScanResultView {
+    pub target: String,
+    pub parameter: String,
+    pub detected_dbms: Option<String>,
+    pub dbms_label: String,
+    pub confidence: u32,
+    pub verdict: String,
+    /// (label, dbms_label, weight, category) for the Signal Explorer.
+    pub signals: Vec<(String, String, u32, String)>,
+    /// Runner-up DBMS candidates with confidence, for the alternatives row.
+    pub alternatives: Vec<(String, u32)>,
+    /// (clause name, accepted) for the clause coverage matrix.
+    pub clause_coverage: Vec<(String, bool)>,
+    pub techniques_tested: Vec<String>,
+    pub probes_run: usize,
 }
 
 pub struct Bridge {
@@ -209,12 +233,9 @@ fn worker(
             emit(messages, ctx, Message::LiveLog(format!("[*] Preparing DBMS detection for {}", target)));
             let outcome = runtime.block_on(run_sql_scan(target, &state, messages, ctx));
             match outcome {
-                Ok(summary) => {
-                    emit(messages, ctx, Message::LiveLog(summary.clone()));
-                    emit(messages, ctx, Message::Output { 
-                        title: "Scan Complete".into(), 
-                        text: summary 
-                    });
+                Ok((summary, view)) => {
+                    emit(messages, ctx, Message::LiveLog(summary));
+                    emit(messages, ctx, Message::ScanComplete(Box::new(view)));
                 }
                 Err(error) => emit(messages, ctx, Message::Error(error)),
             }
@@ -238,7 +259,7 @@ async fn run_sql_scan(
     state: &AppState,
     messages: &Sender<Message>,
     ctx: &egui::Context,
-) -> Result<String, String> {
+) -> Result<(String, ScanResultView), String> {
     // Resolve a probe parameter: use the first existing query key, else
     // inject a dedicated marker parameter so the probes have a slot.
     let raw = target.trim().to_string();
@@ -323,12 +344,78 @@ async fn run_sql_scan(
         Some(d) => format!("{} ({}% confidence)", d.display_name(), result.confidence_score),
         None => "undetermined (no DBMS-specific error patterns observed)".to_string(),
     };
-    Ok(format!(
+    // Build the dashboard view model from the real engine result.
+    let view = build_scan_view(&result);
+    let summary = format!(
         "[+] Detection complete: {} · {} techniques tested · verdict: {:?}",
         detected,
         result.techniques_tested.len(),
         result.dbms_detection.verdict
-    ))
+    );
+    Ok((summary, view))
+}
+
+/// Project the engine's SqlAnalysisResult into the flat view model the
+/// dashboard renders. All values come from the engine; none are invented.
+fn build_scan_view(
+    result: &bugtools_sql::SqlAnalysisResult,
+) -> ScanResultView {
+    let det = &result.dbms_detection;
+    let detected_dbms = result.dbms_hypothesis;
+    let dbms_label = detected_dbms
+        .map(|d| d.display_name())
+        .unwrap_or_else(|| "Undetermined".to_string());
+
+    let signals = det
+        .signals
+        .iter()
+        .map(|s| {
+            (
+                s.label.clone(),
+                s.dbms.display_name(),
+                s.weight,
+                format!("{:?}", s.category),
+            )
+        })
+        .collect();
+
+    let alternatives = det
+        .runner_up
+        .map(|(d, s)| vec![(d.display_name(), s)])
+        .unwrap_or_default();
+
+    // Clause coverage: for the detected DBMS, which clauses are accepted.
+    // When no DBMS is detected, mark everything unknown (false) rather than
+    // guessing — the catalog's `accepted_by` is authoritative only when a
+    // dialect is actually identified.
+    let clause_coverage = if let Some(dbms) = detected_dbms {
+        bugtools_sql::clause_map::clause_map()
+            .iter()
+            .map(|m| {
+                let accepted = m
+                    .variants
+                    .iter()
+                    .any(|v| v.accepted_by.contains(&dbms));
+                (format!("{:?}", m.clause), accepted)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    ScanResultView {
+        target: result.target.clone(),
+        parameter: result.parameter.clone(),
+        detected_dbms: detected_dbms.map(|d| format!("{:?}", d)),
+        dbms_label,
+        confidence: result.confidence_score,
+        verdict: format!("{:?}", det.verdict),
+        signals,
+        alternatives,
+        clause_coverage,
+        techniques_tested: result.techniques_tested.clone(),
+        probes_run: result.techniques_tested.len(),
+    }
 }
 
 fn output(title: impl Into<String>, text: impl Into<String>) -> Message {
