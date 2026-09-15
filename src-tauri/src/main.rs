@@ -54,6 +54,9 @@ fn main() {
             commands::traffic::send_request,
             commands::traffic::repeater_send,
             commands::fuzzer::fuzzer_run,
+            commands::sql_research::sql_analyze_endpoint,
+            commands::sql_research::sql_get_clause_map,
+            commands::sql_research::sql_get_dialect_variants,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
