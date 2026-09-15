@@ -8,13 +8,18 @@ pub async fn create_project(
     state: &AppState,
 ) -> Result<Project, String> {
     let project = Project::new(name, description);
-    state
-        .db
-        .insert_project(&project)
-        .map_err(|e| e.to_string())?;
-
-    let mut active = state.active_project_id.write().await;
-    *active = Some(project.id);
+    // A new project must never inherit the previously selected project's scope.
+    // Clear both pieces of state before database work, including on failure.
+    {
+        let mut active = state.active_project_id.write().await;
+        *active = None;
+        state.scope.set_rules(Vec::new());
+        state
+            .db
+            .insert_project(&project)
+            .map_err(|e| e.to_string())?;
+    }
+    set_active_project(project.id.to_string(), state).await?;
 
     Ok(project)
 }
@@ -24,14 +29,19 @@ pub async fn list_projects(state: &AppState) -> Result<Vec<Project>, String> {
 }
 
 pub async fn set_active_project(project_id: String, state: &AppState) -> Result<(), String> {
-    let id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let mut active = state.active_project_id.write().await;
-    *active = Some(id);
-
-    // Sync scope engine with this project's rules
-    if let Ok(rules) = state.db.get_scope_rules(id) {
-        state.scope.set_rules(rules);
+    // Fail closed: parsing, existence, or scope-query failures leave no active
+    // project and no stale permissions. Bridge actions are also serialized.
+    *active = None;
+    state.scope.set_rules(Vec::new());
+    let id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    let projects = state.db.get_projects().map_err(|e| e.to_string())?;
+    if !projects.iter().any(|project| project.id == id) {
+        return Err(format!("Project {id} does not exist"));
     }
+    let rules = state.db.get_scope_rules(id).map_err(|e| e.to_string())?;
+    state.scope.set_rules(rules);
+    *active = Some(id);
 
     Ok(())
 }

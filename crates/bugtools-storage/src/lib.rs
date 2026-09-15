@@ -133,6 +133,8 @@ impl Database {
             );
             "#,
         )?;
+        // init_default_settings takes the same mutex; release it first.
+        drop(conn);
         // Insert default settings if they don't exist
         self.init_default_settings()?;
         Ok(())
@@ -158,7 +160,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT max_requests_per_second, max_worker_concurrency, max_requests_per_job FROM settings WHERE id = 1")?;
         let mut rows = stmt.query([])?;
-        
+
         if let Some(row) = rows.next()? {
             let rps: f64 = row.get(0)?;
             let conc: i64 = row.get(1)?;
@@ -216,8 +218,12 @@ impl Database {
                 id: Uuid::parse_str(&id_str).unwrap_or_default(),
                 name: row.get(1)?,
                 description: row.get(2)?,
-                created_at: DateTime::parse_from_rfc3339(&created_str).map(|dt| dt.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now()),
-                updated_at: DateTime::parse_from_rfc3339(&updated_str).map(|dt| dt.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now()),
+                created_at: DateTime::parse_from_rfc3339(&created_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                updated_at: DateTime::parse_from_rfc3339(&updated_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
                 active: active_int != 0,
             })
         })?;
@@ -233,7 +239,9 @@ impl Database {
 
     pub fn insert_scope_rule(&self, rule: &ScopeRule) -> Result<(), StorageError> {
         let conn = self.conn.lock().unwrap();
-        let type_str = serde_json::to_string(&rule.rule_type).unwrap_or_default().replace('\"', "");
+        let type_str = serde_json::to_string(&rule.rule_type)
+            .unwrap_or_default()
+            .replace('\"', "");
         conn.execute(
             "INSERT INTO scope_rules (id, project_id, rule_type, pattern, enabled, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
@@ -275,7 +283,9 @@ impl Database {
                 rule_type,
                 pattern,
                 enabled: enabled_int != 0,
-                created_at: DateTime::parse_from_rfc3339(&created_str).map(|dt| dt.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now()),
+                created_at: DateTime::parse_from_rfc3339(&created_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
             })
         })?;
 
@@ -290,8 +300,12 @@ impl Database {
 
     pub fn insert_job(&self, job: &Job) -> Result<(), StorageError> {
         let conn = self.conn.lock().unwrap();
-        let mod_str = serde_json::to_string(&job.module).unwrap_or_default().replace('\"', "");
-        let status_str = serde_json::to_string(&job.status).unwrap_or_default().replace('\"', "");
+        let mod_str = serde_json::to_string(&job.module)
+            .unwrap_or_default()
+            .replace('\"', "");
+        let status_str = serde_json::to_string(&job.status)
+            .unwrap_or_default()
+            .replace('\"', "");
 
         conn.execute(
             r#"INSERT INTO scan_jobs 
@@ -366,9 +380,19 @@ impl Database {
                 current_step,
                 requests_sent,
                 max_requests,
-                created_at: DateTime::parse_from_rfc3339(&created_str).map(|dt| dt.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now()),
-                started_at: started_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
-                finished_at: finished_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                created_at: DateTime::parse_from_rfc3339(&created_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                started_at: started_str.and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc))
+                }),
+                finished_at: finished_str.and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc))
+                }),
                 error_message: error_msg,
             })
         })?;
@@ -472,8 +496,12 @@ impl Database {
                 technique,
                 dbms_hypothesis,
                 notes,
-                created_at: DateTime::parse_from_rfc3339(&created_str).map(|dt| dt.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now()),
-                updated_at: DateTime::parse_from_rfc3339(&updated_str).map(|dt| dt.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now()),
+                created_at: DateTime::parse_from_rfc3339(&created_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                updated_at: DateTime::parse_from_rfc3339(&updated_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
             })
         })?;
 
@@ -488,6 +516,29 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_in_memory_startup_initializes_settings_without_deadlock() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = Database::open_in_memory().and_then(|db| db.get_settings());
+            let _ = sender.send(result);
+        });
+        let settings = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("database startup must not deadlock")
+            .expect("in-memory database must initialize");
+        let defaults = Settings::default();
+        assert_eq!(
+            settings.max_requests_per_second,
+            defaults.max_requests_per_second
+        );
+        assert_eq!(
+            settings.max_worker_concurrency,
+            defaults.max_worker_concurrency
+        );
+        assert_eq!(settings.max_requests_per_job, defaults.max_requests_per_job);
+    }
 
     #[test]
     fn test_storage_project_and_scope_crud() {

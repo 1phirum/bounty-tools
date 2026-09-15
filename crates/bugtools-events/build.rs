@@ -1,7 +1,14 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Explicitly set PROTOC environment variable so tonic-build knows where to find our downloaded compiler
-    std::env::set_var("PROTOC", r"C:\bug-tools\.bin\protoc\bin\protoc.exe");
-    
+    // Honor PROTOC/PATH; retain the repository-local Windows fallback.
+    println!("cargo:rerun-if-env-changed=PROTOC");
+    if std::env::var_os("PROTOC").is_none() {
+        let local = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.bin/protoc/bin/protoc.exe");
+        if cfg!(windows) && local.is_file() {
+            std::env::set_var("PROTOC", local);
+        }
+    }
+
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
@@ -9,6 +16,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &["../../contracts/v1/events.proto"],
             &["../../contracts/v1"],
         )?;
-    
+
     Ok(())
 }
