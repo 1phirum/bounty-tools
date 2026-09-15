@@ -48,6 +48,15 @@ fn main() {
             commands::jobs::cancel_job,
             commands::findings::list_findings,
             commands::findings::create_finding,
+            commands::traffic::get_traffic_page,
+            commands::traffic::get_traffic_entry,
+            commands::traffic::clear_traffic,
+            commands::traffic::send_request,
+            commands::traffic::repeater_send,
+            commands::fuzzer::fuzzer_run,
+            commands::sql_research::sql_analyze_endpoint,
+            commands::sql_research::sql_get_clause_map,
+            commands::sql_research::sql_get_dialect_variants,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,7 +1,6 @@
 use bugtools_core::http::{HttpRequest, HttpResponse};
 use bugtools_scope::ScopeEngine;
 use chrono::Utc;
-use reqwest::Client;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -10,12 +9,24 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
+pub mod fuzzer;
+pub mod rate_limiter;
+pub mod repeater;
+pub mod traffic;
+
+pub use rate_limiter::TokenBucket;
+pub use repeater::{Repeater, RepeaterEdit, RepeaterError};
+pub use traffic::{TrafficEntry, TrafficSource, TrafficStore};
+pub use fuzzer::{Fuzzer, FuzzIterationResult, FuzzPosition, FuzzRunOptions, FuzzRunSummary};
+
 #[derive(Error, Debug)]
 pub enum HttpEngineError {
     #[error("Out of scope: {0}")]
     OutOfScope(String),
     #[error("Request budget exceeded (limit: {0})")]
     BudgetExceeded(u64),
+    #[error("Rate limited: next token in {wait_ms}ms")]
+    RateLimited { wait_ms: u64 },
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
 }
@@ -23,6 +34,8 @@ pub enum HttpEngineError {
 pub struct HttpClientConfig {
     pub max_concurrency: usize,
     pub rate_limit_rps: f64,
+    /// Burst capacity for the token bucket (immediate requests allowed).
+    pub rate_limit_burst: f64,
     pub timeout: Duration,
     pub max_budget: u64,
 }
@@ -32,6 +45,7 @@ impl Default for HttpClientConfig {
         Self {
             max_concurrency: 5,
             rate_limit_rps: 5.0,
+            rate_limit_burst: 10.0,
             timeout: Duration::from_secs(15),
             max_budget: 1000,
         }
@@ -42,6 +56,9 @@ pub struct SafeHttpClient {
     client: Client,
     scope: Arc<ScopeEngine>,
     semaphore: Arc<Semaphore>,
+    /// Enforced token-bucket rate limiter. Previously `rate_limit_rps`
+    /// was declared in config but never enforced — this closes that gap.
+    rate_limiter: Arc<TokenBucket>,
     budget_counter: AtomicU64,
     max_budget: u64,
 }
@@ -58,6 +75,10 @@ impl SafeHttpClient {
             client,
             scope,
             semaphore: Arc::new(Semaphore::new(config.max_concurrency)),
+            rate_limiter: Arc::new(TokenBucket::new(
+                config.rate_limit_burst,
+                config.rate_limit_rps,
+            )),
             budget_counter: AtomicU64::new(0),
             max_budget: config.max_budget,
         }
@@ -67,8 +88,20 @@ impl SafeHttpClient {
         self.budget_counter.load(Ordering::Relaxed)
     }
 
+    /// Current rate-limiter token count, for status reporting / UI.
+    pub fn available_rate_tokens(&self) -> f64 {
+        self.rate_limiter.available_tokens()
+    }
+
+    /// Shared handle to the rate limiter (for repeater/fuzzer engines
+    /// that must obey the same budget as the proxy path).
+    pub fn rate_limiter(&self) -> Arc<TokenBucket> {
+        self.rate_limiter.clone()
+    }
+
     pub async fn execute(&self, req: HttpRequest) -> Result<HttpResponse, HttpEngineError> {
-        // 1. RULE 2: Scope check
+        // 1. Scope check — safety checks are free; they never consume
+        //    budget or rate tokens.
         let scope_eval = self.scope.evaluate(&req.url);
         if !scope_eval.allowed {
             return Err(HttpEngineError::OutOfScope(scope_eval.reason));
@@ -80,7 +113,18 @@ impl SafeHttpClient {
             return Err(HttpEngineError::BudgetExceeded(self.max_budget));
         }
 
-        // 3. Concurrency permit
+        // 3. Rate limit: wait for a token before acquiring the concurrency
+        //    permit, so queued requests do not hold semaphore slots while
+        //    throttled (avoids starving other engines).
+        let wait = self.rate_limiter.wait_duration();
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+        while !self.rate_limiter.try_acquire() {
+            tokio::time::sleep(self.rate_limiter.wait_duration()).await;
+        }
+
+        // 4. Concurrency permit
         let _permit = self.semaphore.acquire().await;
 
         let start_time = Instant::now();
