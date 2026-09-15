@@ -13,7 +13,7 @@ use tauri::Emitter;
 fn main() {
     let db_path = std::env::var("BUGTOOLS_DB_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("workspace/projects/bugtools.db"));
+        .unwrap_or_else(|_| PathBuf::from("../workspace/projects/bugtools.db"));
 
     if let Some(parent) = db_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -57,6 +57,7 @@ fn main() {
             commands::sql_research::sql_analyze_endpoint,
             commands::sql_research::sql_get_clause_map,
             commands::sql_research::sql_get_dialect_variants,
+            commands::system::get_system_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

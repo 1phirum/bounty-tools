@@ -4,7 +4,6 @@ import { Sidebar } from '../components/Sidebar';
 import { TopNav } from '../components/TopNav';
 import { Dashboard } from '../pages/Dashboard/Dashboard';
 import { Projects } from '../pages/Projects/Projects';
-import { Scope } from '../pages/Scope/Scope';
 import { SqlPage } from '../pages/SQL/SqlPage';
 import { Findings } from '../pages/Findings/Findings';
 import { Recon } from '../pages/Recon/Recon';
@@ -72,6 +71,15 @@ export const App: React.FC = () => {
             if (activeProjectId) {
               api.listFindings(activeProjectId).then(setFindings);
             }
+          } else if (payload.type === 'JobFailed') {
+            const { job_id, error } = payload.payload;
+            setJobs((prev) =>
+              prev.map((j) =>
+                j.id === job_id
+                  ? { ...j, status: 'FAILED', current_step: error || 'Job failed' }
+                  : j
+              )
+            );
           } else if (payload.type === 'FindingDiscovered') {
             setFindings((prev) => [payload.payload, ...prev]);
           }
@@ -162,7 +170,6 @@ export const App: React.FC = () => {
           projects={projects}
           activeProject={activeProject}
           onSelectProject={handleSelectProject}
-          onOpenScopeModal={() => navigate('/scope')}
         />
 
         <main className="flex-1 overflow-y-auto p-6 bg-radial-gradient">
@@ -190,17 +197,7 @@ export const App: React.FC = () => {
                 />
               }
             />
-            <Route
-              path="/scope"
-              element={
-                <Scope
-                  rules={scopeRules}
-                  onAddRule={handleAddScopeRule}
-                  onEvaluate={(t) => api.evaluateTarget(t)}
-                />
-              }
-            />
-            <Route path="/sql" element={<SqlPage />} />
+            <Route path="/sql" element={<SqlPage activeProjectId={activeProjectId} onTriggerTestJob={handleTriggerTestJob} />} />
             <Route path="/findings" element={<Findings findings={findings} />} />
             <Route path="/recon" element={<Recon />} />
             <Route path="/http" element={<HttpPage />} />

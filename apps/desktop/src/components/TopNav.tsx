@@ -1,20 +1,37 @@
-import React from 'react';
-import { ShieldCheck, Zap, Activity, FolderKanban, ChevronDown } from 'lucide-react';
-import { Project } from '../types';
+import React, { useEffect, useState } from 'react';
+import { ShieldCheck, Zap, Activity, FolderKanban, ChevronDown, Cpu, MemoryStick } from 'lucide-react';
+import { Project, SystemInfo } from '../types';
+import { api } from '../api/tauri';
 
 interface TopNavProps {
   projects: Project[];
   activeProject: Project | null;
   onSelectProject: (id: string) => void;
-  onOpenScopeModal?: () => void;
 }
 
 export const TopNav: React.FC<TopNavProps> = ({
   projects,
   activeProject,
   onSelectProject,
-  onOpenScopeModal,
 }) => {
+  const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null);
+
+  useEffect(() => {
+    const fetchSystemInfo = async () => {
+      try {
+        const info = await api.getSystemInfo();
+        setSysInfo(info);
+      } catch (err) {
+        console.error('Failed to fetch system info:', err);
+      }
+    };
+
+    fetchSystemInfo();
+    // Refresh system info every 1 second for live stats
+    const interval = setInterval(fetchSystemInfo, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
   return (
     <header className="h-16 border-b border-[#1e2638] bg-[#111622]/80 backdrop-blur-md px-6 flex items-center justify-between select-none">
       {/* Left: Active Project Selector */}
@@ -48,20 +65,36 @@ export const TopNav: React.FC<TopNavProps> = ({
         </div>
 
         <div className="h-5 w-[1px] bg-[#1e2638]"></div>
-
-        {/* Scope Enforced Badge */}
-        <button
-          onClick={onOpenScopeModal}
-          className="flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono font-semibold bg-emerald-950/60 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-900/40 cursor-pointer"
-        >
-          <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-          <ShieldCheck className="w-3.5 h-3.5" />
-          <span>SCOPE ENFORCED (RULE 2)</span>
-        </button>
       </div>
 
-      {/* Right: Telemetry & Limits */}
-      <div className="flex items-center gap-4 text-xs font-mono">
+      {/* Right: System Info & Telemetry */}
+      <div className="flex items-center gap-3 text-xs font-mono">
+        {/* System Info */}
+        {sysInfo && (
+          <>
+            <div className="flex items-center gap-2 text-slate-400 bg-black/30 px-3 py-1.5 rounded-md border border-[#1e2638]">
+              <Cpu className={`w-3.5 h-3.5 ${sysInfo.cpu_usage_percent > 85 ? 'text-red-400' : sysInfo.cpu_usage_percent > 60 ? 'text-amber-400' : 'text-violet-400'}`} />
+              <span className="text-white font-semibold">
+                {sysInfo.cpu_usage_percent.toFixed(1)}%
+              </span>
+              <span className="text-slate-500 truncate max-w-[140px]" title={sysInfo.cpu_name}>
+                {sysInfo.cpu_name}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2 text-slate-400 bg-black/30 px-3 py-1.5 rounded-md border border-[#1e2638]">
+              <MemoryStick className="w-3.5 h-3.5 text-emerald-400" />
+              <span>
+                <strong className={`${sysInfo.ram_usage_percent > 85 ? 'text-red-400' : sysInfo.ram_usage_percent > 60 ? 'text-amber-400' : 'text-white'}`}>
+                  {(sysInfo.ram_used_mb / 1024).toFixed(1)}
+                </strong>
+                <span className="text-slate-500"> / {(sysInfo.ram_total_mb / 1024).toFixed(0)} GB</span>
+              </span>
+            </div>
+          </>
+        )}
+
+        {/* Existing Telemetry */}
         <div className="flex items-center gap-2 text-slate-400 bg-black/30 px-3 py-1.5 rounded-md border border-[#1e2638]">
           <Activity className="w-3.5 h-3.5 text-cyan-400" />
           <span>Rate: <strong className="text-white">5.0 req/s</strong></span>

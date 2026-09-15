@@ -3,12 +3,21 @@ import {
   DatabaseZap,
   Play,
   ShieldCheck,
-  Layers
+  Layers,
+  Sparkles,
+  Check,
+  AlertCircle
 } from 'lucide-react';
 
-export const SqlPage: React.FC = () => {
-  const [target, setTarget] = useState('https://api.targetalpha.com/v1/search');
+interface SqlPageProps {
+  activeProjectId: string | null;
+  onTriggerTestJob: (target: string, module: string) => void;
+}
+
+export const SqlPage: React.FC<SqlPageProps> = ({ activeProjectId, onTriggerTestJob }) => {
+  const [target, setTarget] = useState('');
   const [analyzing, setAnalyzing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [techniques, setTechniques] = useState({
     baseline: true,
@@ -20,12 +29,27 @@ export const SqlPage: React.FC = () => {
   });
 
   const handleStart = () => {
+    setError(null);
+
+    if (!target.trim()) {
+      setError('Please enter a target endpoint URL.');
+      return;
+    }
+
+    if (!activeProjectId) {
+      setError('No active project selected. Please select a project first.');
+      return;
+    }
+
     setAnalyzing(true);
-    // A real implementation would connect to the Go worker via Tauri here.
-    setTimeout(() => {
-      setAnalyzing(false);
-      // Wait for backend to send results. Fake data has been removed.
-    }, 1200);
+    try {
+      onTriggerTestJob(target.trim(), 'sql_injection');
+    } catch (err: any) {
+      setError(err?.toString() ?? 'An unexpected error occurred.');
+    } finally {
+      // The button resets after a short delay; real progress comes via events.
+      setTimeout(() => setAnalyzing(false), 1500);
+    }
   };
 
   return (
@@ -40,6 +64,14 @@ export const SqlPage: React.FC = () => {
           Non-destructive hypothesis testing, baseline differential analysis, and DBMS error dialect detection.
         </p>
       </div>
+
+      {/* Error Display */}
+      {error && (
+        <div className="flex items-center gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-mono">
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         {/* Left Column: Configuration & Techniques */}
@@ -59,16 +91,6 @@ export const SqlPage: React.FC = () => {
                 className="w-full bg-[#090d16] border border-[#1a2540] focus:border-cyan-400 rounded px-3 py-1.5 text-xs font-mono text-white outline-none"
               />
             </div>
-
-            <div className="flex items-center justify-between text-xs font-mono p-2 rounded bg-[#090d16] border border-[#1a2540]">
-              <span className="text-slate-400 flex items-center gap-1.5 text-[11px]">
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" /> Scope Validation
-              </span>
-              <span className="text-emerald-400 font-semibold text-[11px] flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                ENFORCED
-              </span>
-            </div>
           </div>
 
           {/* Analysis Techniques (Section 34) */}
@@ -86,19 +108,33 @@ export const SqlPage: React.FC = () => {
                 differential: 'Differential Analysis (Fingerprint diff)',
                 fingerprinting: 'DBMS Fingerprinting',
                 timing: 'Timing Analysis (Latency correlation)',
-              }).map(([key, label]) => (
-                <label key={key} className="flex items-center gap-2.5 cursor-pointer hover:text-white select-none">
-                  <input
-                    type="checkbox"
-                    checked={techniques[key as keyof typeof techniques]}
-                    onChange={(e) =>
-                      setTechniques({ ...techniques, [key]: e.target.checked })
-                    }
-                    className="rounded bg-[#090d16] border-[#1a2540] text-cyan-500 focus:ring-0"
-                  />
-                  <span className="text-[11.5px]">{label}</span>
-                </label>
-              ))}
+              }).map(([key, label]) => {
+                const isChecked = techniques[key as keyof typeof techniques];
+                return (
+                  <label key={key} className="flex items-center gap-3 cursor-pointer group select-none">
+                    <div className="relative flex items-center justify-center">
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={(e) =>
+                          setTechniques({ ...techniques, [key]: e.target.checked })
+                        }
+                        className="sr-only"
+                      />
+                      <div className={`w-4 h-4 rounded flex items-center justify-center transition-all ${
+                        isChecked 
+                          ? 'bg-cyan-500 border border-cyan-500 text-[#090d16]' 
+                          : 'bg-[#090d16] border border-[#1a2540] text-transparent group-hover:border-[#2c3850]'
+                      }`}>
+                        <Check className="w-3 h-3" strokeWidth={4} />
+                      </div>
+                    </div>
+                    <span className={`text-[11.5px] transition-colors ${isChecked ? 'text-white' : 'text-slate-400 group-hover:text-slate-300'}`}>
+                      {label}
+                    </span>
+                  </label>
+                );
+              })}
             </div>
 
             <button

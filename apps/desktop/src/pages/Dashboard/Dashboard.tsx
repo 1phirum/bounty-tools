@@ -9,7 +9,8 @@ import {
   XCircle,
   Clock,
   ArrowUpRight,
-  CheckCircle2
+  CheckCircle2,
+  ChevronDown
 } from 'lucide-react';
 import { Finding, Job } from '../../types';
 
@@ -30,6 +31,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
 }) => {
   const [quickTarget, setQuickTarget] = useState('https://api.targetalpha.com/v1/search');
   const [quickModule, setQuickModule] = useState('sql_injection');
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+
+  const MODULE_OPTIONS = [
+    { value: "sql_injection", label: "SQL Research Engine (Differential)" },
+    { value: "recon", label: "Recon Worker (Go DNS & Host)" },
+    { value: "http_probe", label: "HTTP Probing & Fingerprint" },
+    { value: "crawler", label: "Scope-bounded Crawler" }
+  ];
 
   return (
     <div className="space-y-6">
@@ -52,8 +61,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
       {/* Metrics Row (Architecture Section 33) */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="p-5 rounded-xl bg-[#111622] border border-[#1e2638] relative overflow-hidden group hover:border-cyan-500/40 transition">
-          <div className="absolute top-0 left-0 w-full h-[2px] bg-cyan-400"></div>
+        <div className="p-5 rounded-xl bg-[#111622] border border-[#1e2638] relative overflow-hidden group hover:border-slate-500/40 transition">
           <div className="flex items-center justify-between">
             <span className="text-xs font-mono font-bold uppercase tracking-wider text-slate-400">Domains</span>
             <Globe className="w-4 h-4 text-cyan-400" />
@@ -64,8 +72,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
         </div>
 
-        <div className="p-5 rounded-xl bg-[#111622] border border-[#1e2638] relative overflow-hidden group hover:border-blue-500/40 transition">
-          <div className="absolute top-0 left-0 w-full h-[2px] bg-blue-400"></div>
+        <div className="p-5 rounded-xl bg-[#111622] border border-[#1e2638] relative overflow-hidden group hover:border-slate-500/40 transition">
           <div className="flex items-center justify-between">
             <span className="text-xs font-mono font-bold uppercase tracking-wider text-slate-400">Hosts</span>
             <Server className="w-4 h-4 text-blue-400" />
@@ -74,8 +81,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <div className="text-[11px] font-mono text-slate-400 mt-1">Live HTTP services</div>
         </div>
 
-        <div className="p-5 rounded-xl bg-[#111622] border border-[#1e2638] relative overflow-hidden group hover:border-indigo-500/40 transition">
-          <div className="absolute top-0 left-0 w-full h-[2px] bg-indigo-400"></div>
+        <div className="p-5 rounded-xl bg-[#111622] border border-[#1e2638] relative overflow-hidden group hover:border-slate-500/40 transition">
           <div className="flex items-center justify-between">
             <span className="text-xs font-mono font-bold uppercase tracking-wider text-slate-400">URLs & Endpoints</span>
             <Link className="w-4 h-4 text-indigo-400" />
@@ -84,8 +90,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <div className="text-[11px] font-mono text-slate-400 mt-1">Normalized inventory</div>
         </div>
 
-        <div className="p-5 rounded-xl bg-[#111622] border border-[#1e2638] relative overflow-hidden group hover:border-amber-500/40 transition">
-          <div className="absolute top-0 left-0 w-full h-[2px] bg-amber-400"></div>
+        <div className="p-5 rounded-xl bg-[#111622] border border-[#1e2638] relative overflow-hidden group hover:border-slate-500/40 transition">
           <div className="flex items-center justify-between">
             <span className="text-xs font-mono font-bold uppercase tracking-wider text-slate-400">Candidates</span>
             <ShieldAlert className="w-4 h-4 text-amber-400" />
@@ -181,10 +186,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <div>
               <h3 className="text-sm font-bold font-mono uppercase tracking-wider text-slate-200 flex items-center gap-2">
                 <Play className="w-4 h-4 text-emerald-400" />
-                Launch Scope Scan
+                Launch Scan Job
               </h3>
               <p className="text-xs text-slate-400 mt-1 font-mono">
-                Passes through Scope Engine & rate limiter before execution.
+                Passes through rate limiter before execution.
               </p>
             </div>
 
@@ -202,23 +207,44 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
               <div>
                 <label className="block text-xs font-mono text-slate-400 mb-1">Scanner Engine Module</label>
-                <select
-                  value={quickModule}
-                  onChange={(e) => setQuickModule(e.target.value)}
-                  className="w-full bg-[#0a0d13] border border-[#1e2638] focus:border-cyan-400 rounded-lg px-3 py-2 text-xs font-mono text-white outline-none cursor-pointer"
-                >
-                  <option value="sql_injection">SQL Research Engine (Differential)</option>
-                  <option value="recon">Recon Worker (Go DNS & Host)</option>
-                  <option value="http_probe">HTTP Probing & Fingerprint</option>
-                  <option value="crawler">Scope-bounded Crawler</option>
-                </select>
+                <div className="relative">
+                  <div
+                    onClick={() => setIsDropdownOpen(!isDropdownOpen)}
+                    className="w-full bg-[#0a0d13] border border-[#1e2638] hover:border-cyan-400 rounded-lg px-3 py-2 text-xs font-mono text-white cursor-pointer flex items-center justify-between transition-colors"
+                  >
+                    <span>{MODULE_OPTIONS.find(m => m.value === quickModule)?.label}</span>
+                    <ChevronDown className="w-4 h-4 text-slate-400" />
+                  </div>
+                  
+                  {isDropdownOpen && (
+                    <>
+                      <div 
+                        className="fixed inset-0 z-40" 
+                        onClick={() => setIsDropdownOpen(false)}
+                      />
+                      <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-[#0a0d13] border border-[#1e2638] rounded-lg shadow-xl overflow-hidden py-1">
+                        {MODULE_OPTIONS.map((opt) => (
+                          <div
+                            key={opt.value}
+                            onClick={() => {
+                              setQuickModule(opt.value);
+                              setIsDropdownOpen(false);
+                            }}
+                            className={`px-3 py-2 text-xs font-mono cursor-pointer hover:bg-[#1a2540] transition-colors ${
+                              quickModule === opt.value ? 'text-cyan-400 font-bold bg-[#1a2540]/50' : 'text-slate-300'
+                            }`}
+                          >
+                            {opt.label}
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
 
               <div className="p-3 rounded-lg bg-black/30 border border-[#1e2638] text-[11px] font-mono text-slate-400 space-y-1">
-                <div className="flex justify-between">
-                  <span>Scope Policy:</span>
-                  <span className="text-emerald-400 font-semibold">Strict Rule 2</span>
-                </div>
+
                 <div className="flex justify-between">
                   <span>Max Requests:</span>
                   <span className="text-white">500</span>

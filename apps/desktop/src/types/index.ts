@@ -139,3 +139,13 @@ export interface FuzzRunSummary {
   deduped: number;
   results: FuzzIterationResult[];
 }
+
+export interface SystemInfo {
+  cpu_name: string;
+  cpu_cores: number;
+  cpu_usage_percent: number;
+  ram_total_mb: number;
+  ram_used_mb: number;
+  ram_usage_percent: number;
+  datetime: string;
+}

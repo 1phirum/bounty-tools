@@ -1,4 +1,4 @@
-import { Finding, Job, Project, ScopeEvaluation, ScopeRule, TrafficEntry, TrafficPage, FuzzRunSummary } from '../types';
+import { Finding, Job, Project, ScopeEvaluation, ScopeRule, TrafficEntry, TrafficPage, FuzzRunSummary, SystemInfo } from '../types';
 
 declare global {
   interface Window {
@@ -305,6 +305,22 @@ export const api = {
       return invoke('list_findings', { projectId });
     }
     return mockFindings.filter(f => f.project_id === projectId);
+  },
+
+  async getSystemInfo(): Promise<SystemInfo> {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return invoke('get_system_info');
+    }
+    return {
+      cpu_name: 'Browser Preview',
+      cpu_cores: navigator.hardwareConcurrency || 4,
+      cpu_usage_percent: 15.2,
+      ram_total_mb: 16384,
+      ram_used_mb: 8192,
+      ram_usage_percent: 50.0,
+      datetime: new Date().toISOString(),
+    };
   },
 
   async createFinding(payload: {

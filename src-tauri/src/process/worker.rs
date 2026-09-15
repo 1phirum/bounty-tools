@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use bugtools_core::events::BugToolsEvent;
 use bugtools_core::finding::{Confidence, Finding, FindingStatus, Severity};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -123,6 +124,7 @@ pub fn execute_recon_worker(
                                     updated_at: Utc::now(),
                                 };
                                 let _ = state.db.insert_finding(&finding);
+                                state.event_bus.publish(BugToolsEvent::FindingDiscovered(finding));
                             }
                             rt.block_on(async {
                                 state

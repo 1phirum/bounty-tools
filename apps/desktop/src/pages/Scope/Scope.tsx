@@ -6,9 +6,20 @@ import {
   Trash2,
   CheckCircle,
   XCircle,
-  Search
+  Search,
+  ChevronDown
 } from 'lucide-react';
 import { ScopeEvaluation, ScopeRule, ScopeRuleType } from '../../types';
+
+const RULE_OPTIONS: { value: ScopeRuleType; label: string }[] = [
+  { value: 'include_domain', label: 'Include Domain (e.g. *.example.com)' },
+  { value: 'exclude_domain', label: 'Exclude Domain (e.g. admin.example.com)' },
+  { value: 'include_path', label: 'Include Path (e.g. /api/)' },
+  { value: 'exclude_path', label: 'Exclude Path (e.g. /logout)' },
+  { value: 'include_port', label: 'Include Port (e.g. 443)' },
+  { value: 'exclude_port', label: 'Exclude Port (e.g. 22)' },
+  { value: 'protocol', label: 'Protocol (e.g. https)' }
+];
 
 interface ScopeProps {
   rules: ScopeRule[];
@@ -22,6 +33,7 @@ export const Scope: React.FC<ScopeProps> = ({ rules, onAddRule, onEvaluate }) =>
   const [testInput, setTestInput] = useState('https://api.targetalpha.com/v1/users');
   const [evalResult, setEvalResult] = useState<ScopeEvaluation | null>(null);
   const [isEvaluating, setIsEvaluating] = useState(false);
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -174,21 +186,37 @@ export const Scope: React.FC<ScopeProps> = ({ rules, onAddRule, onEvaluate }) =>
           </div>
 
           <form onSubmit={handleAdd} className="space-y-4">
-            <div>
+            <div className="relative">
               <label className="block text-xs font-mono text-slate-400 mb-1">Rule Type</label>
-              <select
-                value={newType}
-                onChange={(e) => setNewType(e.target.value as ScopeRuleType)}
-                className="w-full bg-[#0a0d13] border border-[#1e2638] focus:border-cyan-400 rounded-lg px-3 py-2 text-xs font-mono text-white outline-none cursor-pointer"
+              <button
+                type="button"
+                onClick={() => setIsDropdownOpen(!isDropdownOpen)}
+                onBlur={() => setTimeout(() => setIsDropdownOpen(false), 200)}
+                className={`w-full flex items-center justify-between bg-[#0a0d13] border ${isDropdownOpen ? 'border-cyan-400' : 'border-[#1e2638]'} rounded-lg px-3 py-2 text-xs font-mono text-white outline-none cursor-pointer text-left transition-colors`}
               >
-                <option value="include_domain">Include Domain (e.g. *.example.com)</option>
-                <option value="exclude_domain">Exclude Domain (e.g. admin.example.com)</option>
-                <option value="include_path">Include Path (e.g. /api/)</option>
-                <option value="exclude_path">Exclude Path (e.g. /logout)</option>
-                <option value="include_port">Include Port (e.g. 443)</option>
-                <option value="exclude_port">Exclude Port (e.g. 22)</option>
-                <option value="protocol">Protocol (e.g. https)</option>
-              </select>
+                <span>{RULE_OPTIONS.find(o => o.value === newType)?.label}</span>
+                <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${isDropdownOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {isDropdownOpen && (
+                <div className="absolute z-10 w-full mt-1 bg-[#0a0d13] border border-[#1e2638] rounded-lg shadow-2xl overflow-hidden font-mono text-xs text-slate-300">
+                  {RULE_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => {
+                        setNewType(opt.value);
+                        setIsDropdownOpen(false);
+                      }}
+                      className={`w-full text-left px-3 py-2.5 hover:bg-[#161d2d] hover:text-white transition-colors cursor-pointer ${
+                        newType === opt.value ? 'bg-[#161d2d] text-cyan-400 border-l-2 border-cyan-400' : 'border-l-2 border-transparent'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div>
