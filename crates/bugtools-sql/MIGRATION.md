@@ -61,20 +61,29 @@ silently faked in the UI.
 | Probe pipeline (baseline/error/syntax/timing/clause) | **DONE** (pre-existing) | `probe.rs` |
 | Generators (error/time/boolean/union/syntax/clause) | **DONE** (pre-existing) | `generators/` |
 | Input location + value kind + query role classification | **DONE** (pre-existing) | `context.rs` |
-| Multi-hypothesis SQL context with probabilities | **PARTIAL** | single `SqlContext` on result; probabilistic engine TODO |
-| Evidence model with IDs, supports/contradicts | **TODO** | `evidence_id` is a placeholder field |
-| Evidence graph + correlation | **TODO** | |
-| Contradiction handling | **TODO** | design exists in brief; code does not |
+| Evidence model: IDs, observation, supports/contradicts, deltas, references | **DONE** | `evidence/model.rs` |
+| Evidence graph: append-only store, per-parameter/hypothesis queries, category counts | **DONE** | `evidence/model.rs` |
+| Contradiction retention and net scoring | **DONE** | `evidence/model.rs` |
+| Explainable confidence with per-factor breakdown and tiers | **DONE** | `evidence/confidence.rs` |
+| Confidence tier gates (HIGH requires 3 independent categories) | **DONE** | `evidence/confidence.rs` |
+| Reflection excluded from SQL evidence | **DONE** | `evidence/model.rs`, `confidence.rs` |
+| Multi-hypothesis SQL context with probabilities | **TODO** | single `SqlContext` on result still |
+| Evidence → UI wiring | **PARTIAL** | bridge exposes detection panels; evidence panel pending |
 
 ## Phase 4 — Adaptive scheduler
 
 | Feature | Status | Notes |
 |---|---|---|
-| Probe planner scaffold | **PARTIAL** | `controls/planner.rs` exists; scoring TODO |
-| Information-gain scoring | **TODO** | |
-| Budget enforcement (requests/rate/concurrency) | **PARTIAL** | `bugtools-http` enforces rate + budget; not surfaced in SQL scheduler |
-| Timing statistics (median/stddev/percentiles) | **TODO** | `baseline.rs` computes median only |
-| WAF/rate-limit/auth-failure classification | **PARTIAL** | `waf/` module exists; not integrated into scan decisions |
+| Probe scoring: discrimination × reliability ÷ (cost × risk) | **DONE** | `scheduler/planner.rs` |
+| Scheduler selection with inspectable reason | **DONE** | `scheduler/planner.rs` |
+| Already-run probes excluded | **DONE** | `scheduler/planner.rs` |
+| Request budget: wholesale reserve/deny, remaining, exhausted | **DONE** | `scheduler/planner.rs` |
+| Timing statistics: mean/median/stddev/min/max/P95, CV | **DONE** | `analysis/timing.rs` |
+| Timing verdicts gated on sample count and baseline stability | **DONE** | `analysis/timing.rs` |
+| Environment classification (WAF/bot/rate-limit/auth/forbidden/network/5xx) | **DONE** | `analysis/environment.rs` |
+| Environment interference blocks SQL evidence | **DONE** | `analysis/environment.rs` |
+| Information-gain estimation beyond discrimination overlap | **PARTIAL** | heuristic overlap scoring; formal entropy not implemented |
+| Concurrency/rate limits surfaced in SQL scheduler | **PARTIAL** | enforced in `bugtools-http`; not yet surfaced here |
 
 ## Phase 5 — Second-order, API/GraphQL intelligence
 

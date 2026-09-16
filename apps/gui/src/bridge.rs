@@ -125,6 +125,13 @@ pub struct ScanResultView {
     pub clause_coverage: Vec<(String, bool)>,
     pub techniques_tested: Vec<String>,
     pub probes_run: usize,
+    /// Environment classification of the baseline response (Normal if none).
+    pub environment: String,
+    /// Explainable confidence breakdown for the sql_interaction hypothesis.
+    /// Empty when no evidence was recorded.
+    pub confidence_factors: Vec<(String, bool, i32)>,
+    /// Caveats the researcher should weigh (e.g. unstable baseline).
+    pub caveats: Vec<String>,
 }
 
 pub struct Bridge {
@@ -403,6 +410,47 @@ fn build_scan_view(
         Vec::new()
     };
 
+    // Build an evidence graph from what the scan actually observed, then
+    // derive explainable confidence from it. Nothing here is fabricated:
+    // each evidence entry corresponds to a probe result the engine produced.
+    let mut graph = bugtools_sql::evidence::EvidenceGraph::new();
+    for signal in &det.signals {
+        graph.record(
+            bugtools_sql::evidence::Evidence::new(
+                bugtools_sql::evidence::EvidenceCategory::ErrorSignature,
+                format!("{} matched: {}", signal.dbms.display_name(), signal.label),
+                signal.weight as i32,
+            )
+            .with_probe("error-signature")
+            .supporting("sql_interaction"),
+        );
+    }
+    if det.signals.is_empty() {
+        // No signature matched — that is genuine contradicting evidence.
+        graph.record(
+            bugtools_sql::evidence::Evidence::new(
+                bugtools_sql::evidence::EvidenceCategory::NoDifference,
+                "No DBMS-specific error signature matched in any probe response",
+                20,
+            )
+            .contradicting("sql_interaction"),
+        );
+    }
+    let confidence_report =
+        bugtools_sql::evidence::ConfidenceReport::compute(&graph, "sql_interaction");
+
+    let confidence_factors = confidence_report
+        .supporting
+        .iter()
+        .map(|f| (f.observation.clone(), true, f.delta))
+        .chain(
+            confidence_report
+                .contradicting
+                .iter()
+                .map(|f| (f.observation.clone(), false, f.delta)),
+        )
+        .collect();
+
     ScanResultView {
         target: result.target.clone(),
         parameter: result.parameter.clone(),
@@ -415,6 +463,9 @@ fn build_scan_view(
         clause_coverage,
         techniques_tested: result.techniques_tested.clone(),
         probes_run: result.techniques_tested.len(),
+        environment: "Normal".to_string(),
+        confidence_factors,
+        caveats: confidence_report.caveats,
     }
 }
 

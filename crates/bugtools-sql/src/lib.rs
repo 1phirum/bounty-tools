@@ -15,6 +15,12 @@ pub mod differential;
 pub mod parameter;
 pub mod request;
 
+// Phase 3/4: evidence graph + explainable confidence, adaptive scheduling,
+// timing statistics, and environmental classification.
+pub mod analysis;
+pub mod evidence;
+pub mod scheduler;
+
 pub use clause_map::ClauseVariant;
 pub use detection::{DbmsFamily, DetectionVerdict, FiredSignal, SignalCategory};
 pub use probe::{DbmsProbeEngine, ProbeError};
