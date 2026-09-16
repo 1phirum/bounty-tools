@@ -39,6 +39,12 @@ pub mod second_order;
 pub mod payload;
 pub mod safety;
 
+// Adaptive evidence-driven engine (2026-09-16 brief): test identity,
+// typed signals, first-class baseline, hypothesis sets, and a planner that
+// selects the next experiment from evidence.
+pub mod adaptive;
+pub mod adaptive_run;
+
 pub use clause_map::ClauseVariant;
 pub use detection::{DbmsFamily, DetectionVerdict, FiredSignal, SignalCategory};
 pub use probe::{DbmsProbeEngine, ProbeError};
@@ -51,6 +57,7 @@ pub use oob::{InteractionType, OobCorrelation, OobCorrelator, OobInteraction, Oo
 pub use second_order::{SecondOrderTrace, StorageContext, TraceId, TraceRegistry};
 pub use payload::{Boundary, GenerationContext, PayloadCandidate, QuoteMode};
 pub use safety::{SafetyLevel, SafetyPolicy, SafetyVerdict};
+pub use adaptive_run::{run_adaptive, AdaptiveConfig, AdaptiveResult};
 
 /// Run the full SQL analysis pipeline: DBMS detection + clause mapping.
 ///

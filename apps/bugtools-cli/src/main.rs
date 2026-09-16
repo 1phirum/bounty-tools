@@ -535,6 +535,19 @@ fn default_location() -> String {
     "query".to_string()
 }
 
+/// Render a hypothesis list like `WHERE: 0.61 | LIKE: 0.24 | unknown: 0.15`.
+fn render_hypotheses(hypotheses: &[(String, f32)]) -> String {
+    if hypotheses.is_empty() {
+        return "unknown".to_string();
+    }
+    hypotheses
+        .iter()
+        .filter(|(_, p)| *p > 0.01)
+        .map(|(label, p)| format!("{label}: {p:.2}"))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 /// Run the `sqli` command: assess each candidate and emit assessments.
 #[allow(clippy::too_many_arguments)]
 async fn run_sqli_command(
@@ -605,7 +618,7 @@ async fn run_sqli_command(
         println!("[*] authorized {} host(s): {}", hosts.len(), hosts.into_iter().collect::<Vec<_>>().join(", "));
     }
 
-    let mut assessments = Vec::new();
+    let mut assessments: Vec<bugtools_sql::AdaptiveResult> = Vec::new();
     for candidate in &candidates {
         let parsed = match url::Url::parse(&candidate.url) {
             Ok(u) => u,
@@ -637,7 +650,6 @@ async fn run_sqli_command(
             headers.insert("Cookie".to_string(), cookie_header);
         }
 
-        let engine = bugtools_sql::DbmsProbeEngine::new(scope.clone());
         let base = bugtools_core::http::HttpRequest {
             id: uuid::Uuid::new_v4(),
             job_id: None,
@@ -648,82 +660,79 @@ async fn run_sqli_command(
             timestamp: chrono::Utc::now(),
         };
 
-        match bugtools_sql::analyze_endpoint(&engine, &base, &candidate.parameter, &param_value).await
-        {
-            Ok(result) => {
-                let dbms = result
-                    .dbms_hypothesis
-                    .map(|d| d.display_name())
-                    .unwrap_or_else(|| "undetermined".into());
+        // Adaptive, evidence-driven run (replaces blind probe execution).
+        let adaptive = bugtools_sql::run_adaptive(
+            &base,
+            &candidate.parameter,
+            &param_value,
+            scope.clone(),
+            bugtools_sql::AdaptiveConfig {
+                baseline_samples: 3,
+                max_experiments: 8,
+                delay_seconds: 5,
+                dbms_hint: None,
+                application_hint: None,
+            },
+        )
+        .await;
 
-                // Build an assessment. Any non-None confidence REQUIRES at
-                // least one limitation, enforced by the type.
-                let mut builder = bugtools_sql::AssessmentBuilder::new(
-                    parsed.host_str().unwrap_or("").to_string(),
-                    parsed.path().to_string(),
-                    candidate.parameter.clone(),
-                    candidate.location.clone(),
-                )
-                .dbms(&dbms)
-                .repeatability(if result.confidence_score > 0 {
-                    bugtools_sql::Repeatability::Repeated
+        match adaptive {
+            Ok(a) => {
+                if format == "json" {
+                    println!("{}", serde_json::to_string_pretty(&a)?);
                 } else {
-                    bugtools_sql::Repeatability::Unknown
-                });
-
-                for technique in &result.techniques_tested {
-                    builder = builder.technique(technique.clone());
-                }
-                for signal in &result.signals {
-                    builder = builder.signal(signal.clone());
-                }
-
-                if result.confidence_score > 0 {
-                    builder = builder
-                        .confidence(
-                            result.confidence_score as i32,
-                            bugtools_sql::evidence::ConfidenceLevel::from_score(
-                                result.confidence_score as i32,
-                                1,
-                            ),
-                        )
-                        .limitation(bugtools_sql::Limitation::new(
-                            bugtools_sql::LimitationCategory::IncompleteEvidence,
-                            "detection relied on response-based signals; no out-of-band or second-order confirmation was attempted",
-                        ))
-                        .uncertainty(
-                            "timing probes are statistical and were not independently verified",
-                        );
-                } else {
-                    builder = builder.uncertainty("no DBMS-specific behaviour observed");
-                }
-
-                match builder.build() {
-                    Ok(a) => {
-                        if format == "json" {
-                            println!("{}", serde_json::to_string(&a)?);
-                        } else {
-                            println!(
-                                "    → {} (confidence {}), dbms {}",
-                                match a.confidence_level {
-                                    bugtools_sql::evidence::ConfidenceLevel::None => "no finding",
-                                    bugtools_sql::evidence::ConfidenceLevel::Low => "LOW",
-                                    bugtools_sql::evidence::ConfidenceLevel::Medium => "MEDIUM",
-                                    bugtools_sql::evidence::ConfidenceLevel::High => "HIGH",
-                                },
-                                a.confidence,
-                                a.dbms_hypothesis.as_deref().unwrap_or("?")
-                            );
-                            for limitation in &a.limitations {
-                                println!("      limitation: {}", limitation.detail);
-                            }
-                        }
-                        assessments.push(a);
+                    println!("    baseline:   {}", a.baseline_summary);
+                    println!("    context:    {}", render_hypotheses(&a.context_hypotheses));
+                    println!("    position:   {}", render_hypotheses(&a.query_position_hypotheses));
+                    println!("    dbms:       {}", render_hypotheses(&a.dbms_hypotheses));
+                    println!(
+                        "    coverage:   {}   confidence {:.2}",
+                        a.coverage, a.confidence
+                    );
+                    println!(
+                        "    tests:      {} distinct experiment(s) executed, {} duplicate(s) avoided",
+                        a.experiments_executed, a.duplicates_avoided
+                    );
+                    if !a.signals.is_empty() {
+                        let sig: Vec<String> = a
+                            .signals
+                            .iter()
+                            .map(|(k, s)| format!("{k}({s:.2})"))
+                            .collect();
+                        println!("    signals:    {}", sig.join(", "));
                     }
-                    Err(e) => eprintln!("[!] assessment rejected: {e}"),
+                    if !a.tested_families.is_empty() {
+                        println!("    families:");
+                        for f in &a.tested_families {
+                            println!(
+                                "      {:<22} tested {} executed {} equivalent {} strength {:.2}",
+                                f.family, f.tested, f.executed, f.equivalent_result, f.evidence_strength
+                            );
+                        }
+                    }
+                    if !a.confirmed {
+                        println!();
+                        println!("    Diagnostic result (no confirmation):");
+                        for line in &a.diagnostic_report {
+                            println!("      - {line}");
+                        }
+                    }
+                    if !a.remaining_uncertainty.is_empty() {
+                        println!("    Remaining uncertainty:");
+                        for line in &a.remaining_uncertainty {
+                            println!("      - {line}");
+                        }
+                    }
+                    if !a.limitations.is_empty() {
+                        println!("    Limitations:");
+                        for line in &a.limitations {
+                            println!("      - {line}");
+                        }
+                    }
                 }
+                assessments.push(a);
             }
-            Err(e) => eprintln!("[!] probe failed for {}: {e}", candidate.url),
+            Err(e) => eprintln!("[!] adaptive run failed for {}: {e}", candidate.url),
         }
     }
 
