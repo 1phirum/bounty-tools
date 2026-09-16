@@ -61,6 +61,38 @@ enum Commands {
         #[arg(long, default_value_t = 5.0)]
         rps: f64,
     },
+    /// SQL research engine: DBMS detection and clause mapping.
+    Sql {
+        #[command(subcommand)]
+        command: SqlCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum SqlCommands {
+    /// Identify a DBMS from pasted error text (offline, no network).
+    Detect {
+        /// Error text. Use "-" to read from stdin.
+        text: String,
+    },
+    /// Print the clause/dialect reference, optionally filtered.
+    Clauses {
+        /// Show only clauses the given DBMS accepts.
+        #[arg(long)]
+        dbms: Option<String>,
+    },
+    /// Run scope-checked DBMS detection against a live parameterized URL.
+    Analyze {
+        /// Full URL including at least one query parameter, e.g.
+        /// https://target/item?id=1
+        url: String,
+        /// Parameter to probe (defaults to the first query parameter).
+        #[arg(long)]
+        param: Option<String>,
+        /// Authorize this host for the scan. Without it, nothing is sent.
+        #[arg(long)]
+        i_authorize: bool,
+    },
 }
 
 /// CLI renderer for pipeline events.
@@ -233,7 +265,186 @@ async fn main() -> Result<()> {
                 println!("\n[+] wrote summary to {path}");
             }
         }
+        Commands::Sql { command } => {
+            run_sql_command(command).await?;
+        }
     }
 
     Ok(())
+}
+
+/// Handle the `sql` subcommands.
+async fn run_sql_command(command: SqlCommands) -> Result<()> {
+    match command {
+        SqlCommands::Detect { text } => {
+            let input = if text == "-" {
+                use std::io::Read;
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf)?;
+                buf
+            } else {
+                text
+            };
+            let result = bugtools_sql::detection::analyze_error_body(&input);
+            match result.detected_dbms {
+                Some(dbms) => {
+                    println!("DBMS:       {}", dbms.display_name());
+                    println!("Confidence: {}%", result.confidence);
+                    println!("Verdict:    {:?}", result.verdict);
+                }
+                None => {
+                    println!("DBMS:       undetermined");
+                    println!("Verdict:    {:?}", result.verdict);
+                    println!(
+                        "note: absence of a signature does not identify a DBMS — it only means\n      none of the curated error patterns matched this text."
+                    );
+                }
+            }
+            if !result.signals.is_empty() {
+                println!("\nMatched signals:");
+                for signal in &result.signals {
+                    println!(
+                        "  [{:>3}] {} — {} ({:?})",
+                        signal.weight,
+                        signal.dbms.display_name(),
+                        signal.label,
+                        signal.category
+                    );
+                }
+            }
+        }
+
+        SqlCommands::Clauses { dbms } => {
+            let filter = match &dbms {
+                Some(name) => Some(parse_dbms_arg(name).ok_or_else(|| {
+                    anyhow::anyhow!("unknown DBMS '{name}' (mysql|mariadb|postgresql|mssql|oracle|sqlite)")
+                })?),
+                None => None,
+            };
+            for entry in bugtools_sql::clause_map::clause_map() {
+                if let Some(family) = filter {
+                    let relevant = entry
+                        .variants
+                        .iter()
+                        .any(|v| v.accepted_by.contains(&family) || v.rejected_by.contains(&family));
+                    if !relevant {
+                        continue;
+                    }
+                }
+                println!("{:?}", entry.clause);
+                for variant in &entry.variants {
+                    let accepted = variant
+                        .accepted_by
+                        .iter()
+                        .map(|d| d.display_name())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!("    {}  [{}]", variant.syntax, accepted);
+                }
+            }
+        }
+
+        SqlCommands::Analyze {
+            url,
+            param,
+            i_authorize,
+        } => {
+            if !i_authorize {
+                anyhow::bail!(
+                    "refusing to send probes without --i-authorize.\n\
+                     This flag is your explicit confirmation that you are authorized to test this target."
+                );
+            }
+            let parsed = url::Url::parse(&url)
+                .map_err(|e| anyhow::anyhow!("invalid URL: {e}"))?;
+            let host = parsed
+                .host_str()
+                .ok_or_else(|| anyhow::anyhow!("URL has no host"))?
+                .to_string();
+            let param_name = match param {
+                Some(p) => p,
+                None => parsed
+                    .query_pairs()
+                    .next()
+                    .map(|(k, _)| k.to_string())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("URL has no query parameter; pass --param to name one")
+                    })?,
+            };
+            let param_value = parsed
+                .query_pairs()
+                .find(|(k, _)| *k == param_name)
+                .map(|(_, v)| v.to_string())
+                .unwrap_or_default();
+
+            // Scope: authorize exactly this host, nothing else.
+            let scope = std::sync::Arc::new(bugtools_scope::ScopeEngine::new());
+            {
+                use bugtools_core::scope::{ScopeRule, ScopeRuleType};
+                scope.add_rule(ScopeRule::new(
+                    uuid::Uuid::nil(),
+                    ScopeRuleType::IncludeDomain,
+                    host.clone(),
+                ));
+            }
+            println!("[*] authorized host: {host}");
+            println!("[*] probing parameter: {param_name}");
+
+            let engine = bugtools_sql::DbmsProbeEngine::new(scope);
+            let base = bugtools_core::http::HttpRequest {
+                id: uuid::Uuid::new_v4(),
+                job_id: None,
+                url: url.clone(),
+                method: "GET".to_string(),
+                headers: Default::default(),
+                body: None,
+                timestamp: chrono::Utc::now(),
+            };
+            let result =
+                bugtools_sql::analyze_endpoint(&engine, &base, &param_name, &param_value)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("analysis failed: {e}"))?;
+
+            println!();
+            println!("DBMS hypothesis: {}", match result.dbms_hypothesis {
+                Some(d) => d.display_name(),
+                None => "undetermined".to_string(),
+            });
+            println!("Confidence:      {}%", result.confidence_score);
+            println!("Techniques run:  {}", result.techniques_tested.len());
+            if !result.signals.is_empty() {
+                println!("\nSignals (unique):");
+                let mut seen = std::collections::BTreeSet::new();
+                for signal in &result.signals {
+                    seen.insert(signal.clone());
+                }
+                for signal in seen {
+                    println!("  {signal}");
+                }
+            }
+            if let Some(dbms) = result.dbms_hypothesis {
+                println!("\nClause coverage for {} (accepted):", dbms.display_name());
+                for coverage in &result.clause_coverage {
+                    if coverage.dialects_accepting.contains(&dbms) {
+                        println!("  {:?}", coverage.clause);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse a DBMS family from a CLI argument.
+fn parse_dbms_arg(name: &str) -> Option<bugtools_sql::DbmsFamily> {
+    use bugtools_sql::DbmsFamily;
+    match name.to_lowercase().as_str() {
+        "mysql" => Some(DbmsFamily::MySQL),
+        "mariadb" => Some(DbmsFamily::MariaDB),
+        "postgresql" | "postgres" | "pg" => Some(DbmsFamily::PostgreSQL),
+        "mssql" | "sqlserver" | "sql_server" => Some(DbmsFamily::MSSQL),
+        "oracle" => Some(DbmsFamily::Oracle),
+        "sqlite" | "sqlite3" => Some(DbmsFamily::SQLite),
+        _ => None,
+    }
 }

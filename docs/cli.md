@@ -54,6 +54,46 @@ bugtools pipeline example.com --out result.json --depth 2 --max-urls 200 --rps 5
 Every stage streams `PipelineEvent`s to the terminal. Warnings (for example
 a discovery source being unavailable) are reported rather than hidden.
 
+### `bugtools sql <subcommand>`
+
+The SQL research engine, exposed on the CLI.
+
+**`bugtools sql detect <text>`** — identify a DBMS from pasted error text.
+Offline: sends no requests. Use `-` to read the text from stdin.
+
+```sh
+bugtools sql detect "psycopg2.errors.SyntaxError: syntax error at or near \"'\""
+bugtools sql detect - < captured_error.txt
+```
+
+Reports the DBMS, a confidence score, the matched signals with their
+weights and categories, and — when nothing matched — says plainly that
+absence of a signature does not identify a DBMS.
+
+**`bugtools sql clauses [--dbms <family>]`** — print the clause/dialect
+reference. With `--dbms` it shows only clauses relevant to that family, each
+variant annotated with the dialects that accept it.
+
+```sh
+bugtools sql clauses --dbms postgresql
+bugtools sql clauses
+```
+
+**`bugtools sql analyze <url> [--param <name>] --i-authorize`** — run
+scope-checked DBMS detection against a live parameterized endpoint. Probes
+the baseline, error, syntax, clause and timing sets, then reports the DBMS
+hypothesis, confidence, techniques run, unique matched signals and clause
+coverage.
+
+```sh
+bugtools sql analyze "https://target/item?id=1" --i-authorize
+bugtools sql analyze "https://target/item?id=1" --param id --i-authorize
+```
+
+`--i-authorize` is required and is your explicit confirmation that you are
+authorized to test the target. Only the host in the URL is added to scope;
+every other host stays blocked by default deny.
+
 ## Scope and safety
 
 - The pipeline authorizes only the target domain and its subdomain wildcard.
@@ -63,7 +103,8 @@ a discovery source being unavailable) are reported rather than hidden.
 
 ## Status
 
-Implemented: `target`, `discover`, `resolve`, `pipeline`.
+Implemented: `target`, `discover`, `resolve`, `pipeline`, and the full
+`sql` tree (`detect`, `clauses`, `analyze`).
 
 Not yet implemented (see `crates/bugtools-sql/MIGRATION.md` and the workspace
 architecture doc): `probe`, `crawl` as a standalone command, `analyze`,
