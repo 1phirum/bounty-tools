@@ -102,14 +102,28 @@ impl HypothesisSet {
         self.top().label == "unknown"
     }
 
-    /// Render like `WHERE: 0.61 | LIKE: 0.24 | Unknown: 0.15`.
+    /// Render every hypothesis that was considered, including those scored
+    /// at 0.00 — hiding rejected hypotheses makes the engine look as if it
+    /// never evaluated them (the "not learning" complaint). Zero-probability
+    /// entries are shown after a separator so they are clearly ruled out.
     pub fn render(&self) -> String {
-        self.hypotheses
-            .iter()
-            .filter(|h| h.probability > 0.01)
-            .map(|h| format!("{}: {:.2}", h.label, h.probability))
-            .collect::<Vec<_>>()
-            .join(" | ")
+        let mut present = Vec::new();
+        let mut ruled_out = Vec::new();
+        for h in &self.hypotheses {
+            if h.probability > 0.01 {
+                present.push(format!("{}: {:.2}", h.label, h.probability));
+            } else {
+                ruled_out.push(h.label.clone());
+            }
+        }
+        let mut out = present.join(" | ");
+        if !ruled_out.is_empty() {
+            if !out.is_empty() {
+                out.push_str("   ");
+            }
+            out.push_str(&format!("(considered, no evidence: {})", ruled_out.join(", ")));
+        }
+        out
     }
 }
 

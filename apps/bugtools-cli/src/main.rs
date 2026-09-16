@@ -91,6 +91,13 @@ enum Commands {
         /// Emit JSON.
         #[arg(short = 'j', long)]
         json: bool,
+        /// Apply a program's stated rules. Currently: smtp2go.
+        #[arg(long)]
+        program: Option<String>,
+        /// Your researcher handle; sent as an identity header when the
+        /// program requires one.
+        #[arg(long)]
+        handle: Option<String>,
     },
     /// Inspect adaptive payload generation (sends nothing).
     #[command(visible_alias = "gen", long_about = "Show the candidates the SQLi engine would use, with the rationale for each. Sends no traffic.\n\nEXAMPLES:\n  bugtools gen --clause where --quote single\n  bugtools payload --clause order_by --quote numeric --dbms postgresql --tier explore\n  bugtools gen --clause where --quote single --waf --json")]
@@ -168,6 +175,13 @@ enum Commands {
         /// Maximum requests to spend across the whole run.
         #[arg(long, default_value_t = 500)]
         max_requests: u64,
+        /// Apply a program's stated rules. Currently: smtp2go.
+        #[arg(long)]
+        program: Option<String>,
+        /// Your researcher handle; sent as an identity header when the
+        /// program requires one, and available as X-Bug-Bounty otherwise.
+        #[arg(long)]
+        handle: Option<String>,
     },
 }
 
@@ -382,8 +396,20 @@ async fn main() -> Result<()> {
             headers,
             bearer,
             json,
+            program,
+            handle,
         } => {
-            run_tech_command(&url, i_authorize, &cookies, &headers, bearer.as_deref(), json).await?;
+            run_tech_command(
+                &url,
+                i_authorize,
+                &cookies,
+                &headers,
+                bearer.as_deref(),
+                json,
+                program.as_deref(),
+                handle.as_deref(),
+            )
+            .await?;
         }
 
         Commands::Payload {
@@ -415,6 +441,8 @@ async fn main() -> Result<()> {
             format,
             depth,
             max_requests,
+            program,
+            handle,
         } => {
             run_sqli_command(
                 &input,
@@ -427,6 +455,8 @@ async fn main() -> Result<()> {
                 &format,
                 &depth,
                 max_requests,
+                program.as_deref(),
+                handle.as_deref(),
             )
             .await?;
         }
@@ -538,14 +568,27 @@ fn default_location() -> String {
 /// Render a hypothesis list like `WHERE: 0.61 | LIKE: 0.24 | unknown: 0.15`.
 fn render_hypotheses(hypotheses: &[(String, f32)]) -> String {
     if hypotheses.is_empty() {
-        return "unknown".to_string();
+        return "unknown (none considered)".to_string();
     }
-    hypotheses
+    let present: Vec<String> = hypotheses
         .iter()
         .filter(|(_, p)| *p > 0.01)
         .map(|(label, p)| format!("{label}: {p:.2}"))
-        .collect::<Vec<_>>()
-        .join(" | ")
+        .collect();
+    let ruled_out: Vec<&String> = hypotheses
+        .iter()
+        .filter(|(_, p)| *p <= 0.01)
+        .map(|(label, _)| label)
+        .collect();
+    let mut out = present.join(" | ");
+    if out.is_empty() {
+        out = "unknown".to_string();
+    }
+    if !ruled_out.is_empty() {
+        let names: Vec<&str> = ruled_out.iter().map(|s| s.as_str()).collect();
+        out.push_str(&format!("   (considered, no evidence: {})", names.join(", ")));
+    }
+    out
 }
 
 /// Run the `sqli` command: assess each candidate and emit assessments.
@@ -561,7 +604,24 @@ async fn run_sqli_command(
     format: &str,
     depth: &str,
     max_requests: u64,
+    program: Option<&str>,
+    handle: Option<&str>,
 ) -> Result<()> {
+    // Program policy: apply stated scope and constraints when provided.
+    let policy = program.and_then(|name| match name.to_lowercase().as_str() {
+        "smtp2go" => Some(bugtools_sql::policy::smtp2go_policy()),
+        other => {
+            eprintln!("[!] unknown program '{other}' — no policy applied");
+            None
+        }
+    });
+    if let Some(p) = &policy {
+        println!("[*] program: {}", p.name);
+        println!("[*]   rate cap {}/s · max concurrency {}", p.max_rate_per_second, p.max_concurrency);
+        for note in &p.notes {
+            println!("[*]   note: {note}");
+        }
+    }
     if !authorize {
         anyhow::bail!(
             "refusing to probe without --i-authorize.\n\
@@ -570,7 +630,11 @@ async fn run_sqli_command(
     }
 
     let cookie_pairs = resolve_cookies(cli_cookies, cookie_file)?;
-    let header_map = resolve_headers(header_flags, bearer)?;
+    let mut header_map = resolve_headers(header_flags, bearer)?;
+    // Researcher identity header when supplied (e.g. X-Bug-Bounty).
+    if let Some(h) = handle {
+        header_map.entry("X-Bug-Bounty".to_string()).or_insert_with(|| h.to_string());
+    }
     // Progress output goes to stderr when the caller asked for JSON, so
     // stdout stays a single parseable document.
     let progress = |msg: String| {
@@ -602,8 +666,28 @@ async fn run_sqli_command(
     let candidates: Vec<SqliCandidate> = serde_json::from_str(&raw)
         .map_err(|e| anyhow::anyhow!("invalid candidate JSON: {e}"))?;
 
+    // When a program policy is active, refuse out-of-scope targets outright.
+    let candidates: Vec<SqliCandidate> = if let Some(p) = &policy {
+        let (kept, rejected): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|c| {
+            url::Url::parse(&c.url)
+                .ok()
+                .and_then(|u| u.host_str().map(String::from))
+                .map(|h| p.allows_host(&h))
+                .unwrap_or(false)
+        });
+        for c in &rejected {
+            eprintln!("[!] REFUSED (out of program scope): {}", c.url);
+        }
+        if !rejected.is_empty() {
+            eprintln!("[*] {} of {} candidate(s) dropped as out of scope", rejected.len(), rejected.len() + kept.len());
+        }
+        kept
+    } else {
+        candidates
+    };
+
     if candidates.is_empty() {
-        println!("No candidates in {input_path}.");
+        println!("No in-scope candidates in {input_path}.");
         return Ok(());
     }
 
@@ -939,6 +1023,8 @@ async fn run_tech_command(
     header_flags: &[String],
     bearer: Option<&str>,
     json: bool,
+    program: Option<&str>,
+    handle: Option<&str>,
 ) -> Result<()> {
     if !authorize {
         anyhow::bail!(
@@ -951,8 +1037,32 @@ async fn run_tech_command(
         anyhow::bail!("URL has no host");
     }
 
+    // Resolve the program policy before touching the target.
+    let policy = program.and_then(|name| match name.to_lowercase().as_str() {
+        "smtp2go" => Some(bugtools_sql::policy::smtp2go_policy()),
+        other => {
+            eprintln!("[!] unknown program '{other}' — no policy applied");
+            None
+        }
+    });
+    if let Some(p) = &policy {
+        println!("[*] program: {}", p.name);
+        println!("[*]   rate cap {}/s · max concurrency {}", p.max_rate_per_second, p.max_concurrency);
+        let host = parsed.host_str().unwrap_or("").to_string();
+        if !p.allows_host(&host) {
+            anyhow::bail!(
+                "target host '{host}' is out of scope for the {} program",
+                p.name
+            );
+        }
+    }
+
     let cookie_pairs = resolve_cookies(cli_cookies, None)?;
     let mut header_map = resolve_headers(header_flags, bearer)?;
+    // Researcher identity: an X-Bug-Bounty header identifying the handle.
+    if let Some(h) = handle {
+        header_map.entry("X-Bug-Bounty".to_string()).or_insert_with(|| h.to_string());
+    }
     if !cookie_pairs.is_empty() {
         let cookie_header = cookie_pairs
             .iter()

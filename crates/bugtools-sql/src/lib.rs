@@ -37,6 +37,7 @@ pub mod second_order;
 // safety gate, plus WAF vendor signatures and edge/application layer
 // classification.
 pub mod payload;
+pub mod policy;
 pub mod safety;
 
 // Adaptive evidence-driven engine (2026-09-16 brief): test identity,
@@ -57,6 +58,7 @@ pub use oob::{InteractionType, OobCorrelation, OobCorrelator, OobInteraction, Oo
 pub use second_order::{SecondOrderTrace, StorageContext, TraceId, TraceRegistry};
 pub use payload::{Boundary, GenerationContext, PayloadCandidate, QuoteMode};
 pub use safety::{SafetyLevel, SafetyPolicy, SafetyVerdict};
+pub use policy::{smtp2go_policy, PolicyError, ProgramPolicy};
 pub use adaptive_run::{run_adaptive, AdaptiveConfig, AdaptiveResult};
 
 /// Run the full SQL analysis pipeline: DBMS detection + clause mapping.
