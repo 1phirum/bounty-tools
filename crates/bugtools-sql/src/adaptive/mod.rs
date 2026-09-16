@@ -15,6 +15,7 @@ pub mod baseline;
 pub mod fingerprint;
 pub mod hypotheses;
 pub mod planner;
+pub mod repetition;
 pub mod signals;
 
 pub use baseline::{BaselineProfile, BaselineSample, MIN_BASELINE_SAMPLES};
@@ -23,6 +24,7 @@ pub use hypotheses::{
     infer_context, infer_dbms, infer_query_position, ContextObservations, DbmsObservations,
     Hypothesis, HypothesisSet, PositionObservations,
 };
+pub use repetition::{outcome_signature, RepetitionTracker, RepetitionVerdict, REQUIRED_REPETITIONS};
 pub use planner::{
     negative_result_report, plan, remaining_uncertainty, CoverageState, Experiment, NextAction,
     PlannerState,

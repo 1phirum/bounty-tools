@@ -14,6 +14,7 @@ use crate::adaptive::baseline::{BaselineProfile, BaselineSample};
 use crate::adaptive::fingerprint::{TestFingerprint, TestLedger, TestStatus};
 use crate::adaptive::hypotheses::{infer_context, infer_dbms, ContextObservations, DbmsObservations};
 use crate::adaptive::planner::{negative_result_report, remaining_uncertainty, CoverageState};
+use crate::adaptive::repetition::{RepetitionTracker, RepetitionVerdict};
 use crate::adaptive::signals::{extract_signals, ResponseView, Signal, SignalKind};
 use crate::detection::DbmsFamily;
 use crate::payload::{compose_for, ClauseStrategy, ComposeContext, EscalationTier, QuoteMode, RepresentationContext};
@@ -42,6 +43,10 @@ pub struct AdaptiveResult {
     pub tested_families: Vec<FamilySummary>,
     pub experiments_executed: usize,
     pub duplicates_avoided: usize,
+    /// Tests whose outcome reproduced across repeated executions.
+    pub repetitions_verified: usize,
+    /// Tests whose outcomes disagreed across repetitions and were discarded.
+    pub flaky_tests: usize,
 
     pub coverage: String,
     pub confidence: f32,
@@ -198,6 +203,8 @@ pub async fn run_adaptive(
     let mut syntax_error_seen = false;
     let mut boolean_diverged = false;
     let mut observed_error_body: Option<String> = None;
+    let mut repetitions_verified = 0usize;
+    let mut flaky_tests = 0usize;
 
     'outer: for technique in techniques {
         let candidates = compose_for(technique, &ctx, EscalationTier::Recon, config.delay_seconds);
@@ -223,14 +230,45 @@ pub async fn run_adaptive(
                 continue; // duplicate — skip
             }
 
-            let view = match execute(&client, base, Some(&candidate.rendered), parameter).await {
-                Ok(v) => v,
-                Err(e) => {
-                    ledger.record_outcome(&fingerprint, TestStatus::Inconclusive, e);
-                    continue;
+            // Execute the SAME test repeatedly. A single differential is not
+            // evidence: dynamic content, cache and jitter all produce one-off
+            // differences. Only a reproduced outcome is trusted.
+            let mut tracker = RepetitionTracker::new();
+            let mut last_view: Option<ResponseView> = None;
+            for _ in 0..crate::adaptive::repetition::REQUIRED_REPETITIONS {
+                match execute(&client, base, Some(&candidate.rendered), parameter).await {
+                    Ok(v) => {
+                        let reps = extract_signals(
+                            &baseline_view,
+                            &v,
+                            "baseline",
+                            &candidate.logical_test,
+                        );
+                        tracker.push(&reps);
+                        last_view = Some(v);
+                    }
+                    Err(e) => {
+                        ledger.record_outcome(&fingerprint, TestStatus::Inconclusive, e);
+                        continue;
+                    }
                 }
+            }
+            let view = match last_view {
+                Some(v) => v,
+                None => continue,
             };
             experiments += 1;
+
+            // Verify repetition before accepting any signal.
+            let verdict = tracker.verdict();
+            let repeated = matches!(verdict, RepetitionVerdict::Reproduced { .. });
+            if let RepetitionVerdict::Flaky { detail } = &verdict {
+                // A flaky result is recorded as such and contributes nothing.
+                flaky_tests += 1;
+                ledger.record_outcome(&fingerprint, TestStatus::Inconclusive, detail.clone());
+                continue;
+            }
+            repetitions_verified += 1;
 
             let signals = extract_signals(
                 &baseline_view,
@@ -265,11 +303,14 @@ pub async fn run_adaptive(
                 }
             }
 
+            // Status is gated on repetition: an unverified positive is not
+            // allowed to become "Interesting".
             let status = if signals.iter().any(|s| s.kind.is_environmental()) {
                 TestStatus::Blocked
-            } else if signals
-                .iter()
-                .any(|s| s.kind.supports_sql_hypothesis() && s.strength > 0.3)
+            } else if repeated
+                && signals
+                    .iter()
+                    .any(|s| s.kind.supports_sql_hypothesis() && s.strength > 0.3)
             {
                 TestStatus::Interesting
             } else {
@@ -443,6 +484,8 @@ pub async fn run_adaptive(
         tested_families: families,
         experiments_executed: experiments,
         duplicates_avoided: ledger.duplicates_avoided(),
+        repetitions_verified,
+        flaky_tests,
         coverage: coverage.label().to_string(),
         confidence,
         confirmed,

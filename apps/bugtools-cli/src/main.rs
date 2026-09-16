@@ -571,22 +571,31 @@ async fn run_sqli_command(
 
     let cookie_pairs = resolve_cookies(cli_cookies, cookie_file)?;
     let header_map = resolve_headers(header_flags, bearer)?;
+    // Progress output goes to stderr when the caller asked for JSON, so
+    // stdout stays a single parseable document.
+    let progress = |msg: String| {
+        if format == "json" {
+            eprintln!("{msg}");
+        } else {
+            println!("{msg}");
+        }
+    };
     if !cookie_pairs.is_empty() {
-        println!(
+        progress(format!(
             "[*] session: {} cookie(s) — {}",
             cookie_pairs.len(),
             cookie_pairs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
-        );
+        ));
     }
     if !header_map.is_empty() {
-        println!(
+        progress(format!(
             "[*] session: {} header(s) — {}",
             header_map.len(),
             header_map.keys().cloned().collect::<Vec<_>>().join(", ")
-        );
+        ));
     }
     let _budget = bugtools_sql::scheduler::RequestBudget::new(max_requests);
-    println!("[*] request budget: {max_requests}");
+    progress(format!("[*] request budget: {max_requests}"));
 
     let raw = std::fs::read_to_string(input_path)
         .map_err(|e| anyhow::anyhow!("cannot read {input_path}: {e}"))?;
@@ -615,7 +624,11 @@ async fn run_sqli_command(
                 host.clone(),
             ));
         }
-        println!("[*] authorized {} host(s): {}", hosts.len(), hosts.into_iter().collect::<Vec<_>>().join(", "));
+        progress(format!(
+            "[*] authorized {} host(s): {}",
+            hosts.len(),
+            hosts.into_iter().collect::<Vec<_>>().join(", ")
+        ));
     }
 
     let mut assessments: Vec<bugtools_sql::AdaptiveResult> = Vec::new();
@@ -633,10 +646,10 @@ async fn run_sqli_command(
             .map(|(_, v)| v.to_string())
             .unwrap_or_default();
 
-        println!(
+        progress(format!(
             "[*] {} {} param={} ({}) depth={}",
             candidate.method, candidate.url, candidate.parameter, candidate.location, depth
-        );
+        ));
 
         // Build the request with the researcher's session material so the
         // scan runs authenticated exactly as they configured it.
@@ -679,7 +692,7 @@ async fn run_sqli_command(
         match adaptive {
             Ok(a) => {
                 if format == "json" {
-                    println!("{}", serde_json::to_string_pretty(&a)?);
+                    // Collected and emitted once at the end.
                 } else {
                     println!("    baseline:   {}", a.baseline_summary);
                     println!("    context:    {}", render_hypotheses(&a.context_hypotheses));
@@ -690,8 +703,12 @@ async fn run_sqli_command(
                         a.coverage, a.confidence
                     );
                     println!(
-                        "    tests:      {} distinct experiment(s) executed, {} duplicate(s) avoided",
+                        "    tests:      {} distinct experiment(s), {} duplicate(s) avoided",
                         a.experiments_executed, a.duplicates_avoided
+                    );
+                    println!(
+                        "    reliability: {} test(s) reproduced under repetition, {} discarded as flaky",
+                        a.repetitions_verified, a.flaky_tests
                     );
                     if !a.signals.is_empty() {
                         let sig: Vec<String> = a
@@ -736,9 +753,15 @@ async fn run_sqli_command(
         }
     }
 
+    if format == "json" {
+        // A single clean document on stdout.
+        println!("{}", serde_json::to_string_pretty(&assessments)?);
+    }
     if let Some(path) = output_path {
         std::fs::write(path, serde_json::to_string_pretty(&assessments)?)?;
-        println!("\n[+] wrote {} assessments to {path}", assessments.len());
+        if format != "json" {
+            println!("\n[+] wrote {} assessments to {path}", assessments.len());
+        }
     } else if format == "text" {
         println!("\n[+] {} candidate(s) assessed", assessments.len());
     }
