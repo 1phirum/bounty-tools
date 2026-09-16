@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "apps/gui",
+    "apps/bugtools-cli",
     "crates/bugtools-core",
     "crates/bugtools-scope",
     "crates/bugtools-storage",
@@ -11,6 +12,11 @@ members = [
     "crates/bugtools-scheduler",
     "crates/bugtools-sql",
     "crates/bugtools-parser",
+    "crates/bugtools-dns",
+    "crates/bugtools-discovery",
+    "crates/bugtools-crawler",
+    "crates/bugtools-output",
+    "crates/bugtools-runtime",
 ]
 
 [workspace.package]
@@ -29,6 +35,12 @@ tokio = { version = "1.40", features = ["full"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 url = { version = "2.5", features = ["serde"] }
 regex = "1.10"
+clap = { version = "4.5", features = ["derive"] }
+hickory-resolver = "0.24"
+futures = "0.3"
+async-trait = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+scraper = "0.20"
 sha2 = "0.10"
 toml = "0.8"
 tracing = "0.1"

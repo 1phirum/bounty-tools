@@ -1,0 +1,25 @@
+[package]
+name = "bugtools-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+bugtools-core = { path = "../bugtools-core" }
+bugtools-dns = { path = "../bugtools-dns" }
+bugtools-discovery = { path = "../bugtools-discovery" }
+bugtools-crawler = { path = "../bugtools-crawler" }
+bugtools-http = { path = "../bugtools-http" }
+bugtools-scope = { path = "../bugtools-scope" }
+bugtools-output = { path = "../bugtools-output" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }

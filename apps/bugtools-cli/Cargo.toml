@@ -1,0 +1,26 @@
+[package]
+name = "bugtools-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "bugtools"
+path = "src/main.rs"
+
+[dependencies]
+bugtools-core = { path = "../../crates/bugtools-core" }
+bugtools-dns = { path = "../../crates/bugtools-dns" }
+bugtools-discovery = { path = "../../crates/bugtools-discovery" }
+bugtools-crawler = { path = "../../crates/bugtools-crawler" }
+bugtools-http = { path = "../../crates/bugtools-http" }
+bugtools-scope = { path = "../../crates/bugtools-scope" }
+bugtools-runtime = { path = "../../crates/bugtools-runtime" }
+bugtools-output = { path = "../../crates/bugtools-output" }
+clap = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+anyhow = "1.0"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
