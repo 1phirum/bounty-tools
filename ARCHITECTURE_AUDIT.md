@@ -19,7 +19,7 @@ Required by Phase 0 of the 2026-09-16 brief. Audit run against commit
 | `bugtools-storage` | SQLite persistence | working |
 | `bugtools-fingerprint` | response normalization | working |
 | `apps/bugtools-cli` | `bugtools` binary | working |
-| `apps/gui` | egui workstation | working |
+| `apps/gui` | egui workstation | REMOVED 2026-09-17: the platform is now CLI-only per the current architecture brief |
 
 ## bugtools-sql module map
 
@@ -84,5 +84,5 @@ in a future pass.
 
 Dedicated `bugtools-waf` and `bugtools-sqli` crates, UNION column-count
 inference, stacked-query execution, causal executor, OOB listener, second
-order executor, GraphQL/WebSocket locations, and the full egui attack-surface
+order executor, GraphQL/WebSocket locations, and the attack-surface
 view. No placeholder UI or command claims these work.

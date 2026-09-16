@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "apps/gui",
     "apps/bugtools-cli",
     "crates/bugtools-core",
     "crates/bugtools-scope",
@@ -46,5 +45,3 @@ sha2 = "0.10"
 toml = "0.8"
 tracing = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "native-tls", "json", "cookies"] }
-eframe = "0.29"
-egui = "0.29"

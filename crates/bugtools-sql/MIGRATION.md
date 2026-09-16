@@ -122,7 +122,7 @@ All **TODO**. No `SqlBackend` trait yet.
 
 | Feature | Status | Notes |
 |---|---|---|
-| egui workstation dashboard with real detection panels | **DONE** | `apps/gui/src/workstation.rs` |
+| egui workstation dashboard with real detection panels | **REMOVED** | the platform is now CLI-only; the CLI carries these panels |
 | Scan history (in-memory) | **DONE** | session-only; not persisted |
 | Persistence of scans/cookies/evidence to SQLite | **TODO** | `bugtools-storage` has projects/findings; not scan data |
 | JSON / Markdown reports, evidence bundles | **TODO** | GUI has a basic findings report only |
