@@ -8,7 +8,7 @@
 //! operations observed on the path.
 
 use crate::sink::detector::detect_sinks;
-use crate::source::detector::{detect_sources, SourceRead};
+use crate::source::detector::detect_sources;
 use serde::{Deserialize, Serialize};
 
 /// A node in the taint graph.
@@ -130,7 +130,7 @@ pub fn build_graph(script: &str) -> TaintGraph {
             let path_end = (sink.offset + 200).min(script.len());
             let path = &script[src.offset..path_end];
             let direct_use = same_data_object(&src.context_line, &sink.context_line);
-            let inline_use = sink.context_line.contains(&src.label_backing(path));
+            let inline_use = sink.context_line.contains(src.kind.label());
 
             if !direct_use && !inline_use {
                 continue;
@@ -174,15 +174,6 @@ pub fn build_graph(script: &str) -> TaintGraph {
         nodes,
         edges,
         flows,
-    }
-}
-
-impl SourceRead {
-    /// A short label suitable for inline-use matching on the path text.
-    fn label_backing(&self, _path: &str) -> String {
-        // The API name itself (e.g. "location.hash") is what would appear
-        // inline in the sink line.
-        self.kind.label().to_string()
     }
 }
 

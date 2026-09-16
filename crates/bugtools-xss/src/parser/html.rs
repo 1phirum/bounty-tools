@@ -134,17 +134,10 @@ pub fn parse_at(html: &str, offset: usize, needle: &str) -> HtmlParseContext {
 
 /// Walk the HTML and find the token covering `offset`.
 fn locate_parsed(html: &str, offset: usize) -> Option<HtmlParseContext> {
-    use scraper::Html;
-
-    // scraper does not expose byte offsets directly, so we parse structure
-    // and then search for the exact tag/text that contains the offset by
-    // re-scanning with position awareness. This keeps us on a real parser
-    // (correct handling of comments, quotes, raw text) while recovering
-    // offsets.
-    let _ = Html::parse_document(html);
-
     // Build a token map with byte ranges using a lightweight scan that
     // mirrors html5ever's tokenization rules for the cases we care about.
+    // A full browser-grade parse is deliberately not used here: it does not
+    // expose byte offsets, which is exactly what reflection analysis needs.
     let tokens = tokenize_with_offsets(html);
     for tok in &tokens {
         // Half-open range [start, end): a tag ends *before* the next token

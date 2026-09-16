@@ -9,9 +9,9 @@ use crate::confidence::{calibrate, confirm_on_execution, EvidenceScore};
 use crate::exploitability::{
     ExploitabilityMachine, ObservationKind as StageObservation, XssObservation,
 };
-use crate::parser::html::{parse_at, ContextMethod, HtmlNodeType};
+use crate::parser::html::ContextMethod;
 use crate::reflection::correlate;
-use crate::strategy::{build_strategy, RenderingModel};
+use crate::strategy::build_strategy;
 use crate::taint::graph::build_graph;
 use crate::technology::{detect, observations_from_response};
 

@@ -97,17 +97,14 @@ fn decode_percent(fragment: &str) -> Option<String> {
     let mut i = 0;
     let mut changed = false;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() + 1 {
-            if i + 2 < bytes.len() || i + 2 == bytes.len() {
-                if i + 2 < bytes.len() + 1 && i + 2 <= bytes.len() - 1 {
-                    let hex = &fragment[i + 1..i + 3];
-                    if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                        out.push(byte);
-                        i += 3;
-                        changed = true;
-                        continue;
-                    }
-                }
+        // A valid escape needs two hex digits after the '%'.
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = &fragment[i + 1..i + 3];
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                i += 3;
+                changed = true;
+                continue;
             }
         }
         out.push(bytes[i]);
