@@ -44,13 +44,15 @@ silently faked in the UI.
 | Feature | Status | Notes |
 |---|---|---|
 | Baseline collection + stability (`baseline.rs`) | **DONE** (pre-existing) | median + stability classification |
-| Response fingerprinting | **PARTIAL** | `bugtools-fingerprint` crate normalizes timestamps/IDs; not yet wired to `ResponseFingerprint`-based diffing in this crate |
+| Response fingerprinting (normalize volatile values) | **DONE** | `analysis/diff.rs` strips whitespace/opaque IDs |
+| Response differential (status/similarity/length/timing) | **DONE** | `analysis/diff.rs` `ResponseDifference` |
 | Crawler (HTML links/forms) | **TODO** | |
 | sitemap.xml / robots.txt discovery | **TODO** | |
 | JavaScript endpoint extraction | **TODO** | |
 | OpenAPI / Swagger ingestion | **TODO** | |
 | GraphQL introspection | **TODO** | |
 | Endpoint deduplication + grouping | **TODO** | |
+| Body hash / structural signature (pre-existing fingerprint crate) | **PARTIAL** | `bugtools-fingerprint` exists; not combined with diff here |
 
 ## Phase 3 — SQL context, DBMS hypotheses, clause mapping, evidence
 
