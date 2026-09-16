@@ -66,6 +66,31 @@ enum Commands {
         #[command(subcommand)]
         command: SqlCommands,
     },
+    /// Assess SQLi candidates from an endpoints/parameters JSON file.
+    Sqli {
+        /// JSON file describing candidates: a list of objects with url,
+        /// method, parameter and location fields.
+        #[arg(long)]
+        input: String,
+        /// Authorize the hosts in the input file for probing.
+        #[arg(long)]
+        i_authorize: bool,
+        /// Maximum concurrent probes.
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
+        /// Requests per second.
+        #[arg(long, default_value_t = 5.0)]
+        rate_limit: f64,
+        /// Per-request timeout in seconds.
+        #[arg(long, default_value_t = 15)]
+        timeout: u64,
+        /// Write the assessments as JSON to this path.
+        #[arg(long)]
+        output: Option<String>,
+        /// Output format for stdout: text or json.
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -268,6 +293,201 @@ async fn main() -> Result<()> {
         Commands::Sql { command } => {
             run_sql_command(command).await?;
         }
+
+        Commands::Sqli {
+            input,
+            i_authorize,
+            concurrency: _,
+            rate_limit: _,
+            timeout: _,
+            output,
+            format,
+        } => {
+            run_sqli_command(&input, i_authorize, output.as_deref(), &format).await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// A SQLi candidate as read from the input JSON.
+#[derive(serde::Deserialize)]
+struct SqliCandidate {
+    url: String,
+    #[serde(default = "default_method")]
+    method: String,
+    parameter: String,
+    #[serde(default = "default_location")]
+    location: String,
+}
+
+fn default_method() -> String {
+    "GET".to_string()
+}
+
+fn default_location() -> String {
+    "query".to_string()
+}
+
+/// Run the `sqli` command: assess each candidate and emit assessments.
+async fn run_sqli_command(
+    input_path: &str,
+    authorize: bool,
+    output_path: Option<&str>,
+    format: &str,
+) -> Result<()> {
+    if !authorize {
+        anyhow::bail!(
+            "refusing to probe without --i-authorize.\n\
+             This flag is your explicit confirmation that you are authorized to test every target in the input file."
+        );
+    }
+
+    let raw = std::fs::read_to_string(input_path)
+        .map_err(|e| anyhow::anyhow!("cannot read {input_path}: {e}"))?;
+    let candidates: Vec<SqliCandidate> = serde_json::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("invalid candidate JSON: {e}"))?;
+
+    if candidates.is_empty() {
+        println!("No candidates in {input_path}.");
+        return Ok(());
+    }
+
+    // Authorize every distinct host named in the file.
+    let scope = std::sync::Arc::new(bugtools_scope::ScopeEngine::new());
+    {
+        use bugtools_core::scope::{ScopeRule, ScopeRuleType};
+        let mut hosts = std::collections::BTreeSet::new();
+        for c in &candidates {
+            if let Some(h) = url::Url::parse(&c.url).ok().and_then(|u| u.host_str().map(String::from)) {
+                hosts.insert(h);
+            }
+        }
+        for host in &hosts {
+            scope.add_rule(ScopeRule::new(
+                uuid::Uuid::nil(),
+                ScopeRuleType::IncludeDomain,
+                host.clone(),
+            ));
+        }
+        println!("[*] authorized {} host(s): {}", hosts.len(), hosts.into_iter().collect::<Vec<_>>().join(", "));
+    }
+
+    let mut assessments = Vec::new();
+    for candidate in &candidates {
+        let parsed = match url::Url::parse(&candidate.url) {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!("[!] skipping {} — invalid URL: {e}", candidate.url);
+                continue;
+            }
+        };
+        let param_value = parsed
+            .query_pairs()
+            .find(|(k, _)| *k == candidate.parameter)
+            .map(|(_, v)| v.to_string())
+            .unwrap_or_default();
+
+        println!(
+            "[*] {} {} param={} ({})",
+            candidate.method, candidate.url, candidate.parameter, candidate.location
+        );
+
+        let engine = bugtools_sql::DbmsProbeEngine::new(scope.clone());
+        let base = bugtools_core::http::HttpRequest {
+            id: uuid::Uuid::new_v4(),
+            job_id: None,
+            url: candidate.url.clone(),
+            method: candidate.method.clone(),
+            headers: Default::default(),
+            body: None,
+            timestamp: chrono::Utc::now(),
+        };
+
+        match bugtools_sql::analyze_endpoint(&engine, &base, &candidate.parameter, &param_value).await
+        {
+            Ok(result) => {
+                let dbms = result
+                    .dbms_hypothesis
+                    .map(|d| d.display_name())
+                    .unwrap_or_else(|| "undetermined".into());
+
+                // Build an assessment. Any non-None confidence REQUIRES at
+                // least one limitation, enforced by the type.
+                let mut builder = bugtools_sql::AssessmentBuilder::new(
+                    parsed.host_str().unwrap_or("").to_string(),
+                    parsed.path().to_string(),
+                    candidate.parameter.clone(),
+                    candidate.location.clone(),
+                )
+                .dbms(&dbms)
+                .repeatability(if result.confidence_score > 0 {
+                    bugtools_sql::Repeatability::Repeated
+                } else {
+                    bugtools_sql::Repeatability::Unknown
+                });
+
+                for technique in &result.techniques_tested {
+                    builder = builder.technique(technique.clone());
+                }
+                for signal in &result.signals {
+                    builder = builder.signal(signal.clone());
+                }
+
+                if result.confidence_score > 0 {
+                    builder = builder
+                        .confidence(
+                            result.confidence_score as i32,
+                            bugtools_sql::evidence::ConfidenceLevel::from_score(
+                                result.confidence_score as i32,
+                                1,
+                            ),
+                        )
+                        .limitation(bugtools_sql::Limitation::new(
+                            bugtools_sql::LimitationCategory::IncompleteEvidence,
+                            "detection relied on response-based signals; no out-of-band or second-order confirmation was attempted",
+                        ))
+                        .uncertainty(
+                            "timing probes are statistical and were not independently verified",
+                        );
+                } else {
+                    builder = builder.uncertainty("no DBMS-specific behaviour observed");
+                }
+
+                match builder.build() {
+                    Ok(a) => {
+                        if format == "json" {
+                            println!("{}", serde_json::to_string(&a)?);
+                        } else {
+                            println!(
+                                "    → {} (confidence {}), dbms {}",
+                                match a.confidence_level {
+                                    bugtools_sql::evidence::ConfidenceLevel::None => "no finding",
+                                    bugtools_sql::evidence::ConfidenceLevel::Low => "LOW",
+                                    bugtools_sql::evidence::ConfidenceLevel::Medium => "MEDIUM",
+                                    bugtools_sql::evidence::ConfidenceLevel::High => "HIGH",
+                                },
+                                a.confidence,
+                                a.dbms_hypothesis.as_deref().unwrap_or("?")
+                            );
+                            for limitation in &a.limitations {
+                                println!("      limitation: {}", limitation.detail);
+                            }
+                        }
+                        assessments.push(a);
+                    }
+                    Err(e) => eprintln!("[!] assessment rejected: {e}"),
+                }
+            }
+            Err(e) => eprintln!("[!] probe failed for {}: {e}", candidate.url),
+        }
+    }
+
+    if let Some(path) = output_path {
+        std::fs::write(path, serde_json::to_string_pretty(&assessments)?)?;
+        println!("\n[+] wrote {} assessments to {path}", assessments.len());
+    } else if format == "text" {
+        println!("\n[+] {} candidate(s) assessed", assessments.len());
     }
 
     Ok(())

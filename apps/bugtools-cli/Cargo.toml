@@ -21,6 +21,7 @@ bugtools-output = { path = "../../crates/bugtools-output" }
 bugtools-sql = { path = "../../crates/bugtools-sql" }
 clap = { workspace = true }
 tokio = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }

@@ -21,11 +21,28 @@ pub mod analysis;
 pub mod evidence;
 pub mod scheduler;
 
+// Advanced SQLi capability integration (brief 2026-09-16):
+// probabilistic context hypotheses, query-position classification,
+// DB2/H2 fingerprinting, OOB correlation, second-order tracing,
+// false-positive contradiction checks, and the mandatory-limitations
+// assessment model.
+pub mod assessment;
+pub mod dbms_ext;
+pub mod false_positive;
+pub mod hypothesis;
+pub mod oob;
+pub mod second_order;
+
 pub use clause_map::ClauseVariant;
 pub use detection::{DbmsFamily, DetectionVerdict, FiredSignal, SignalCategory};
 pub use probe::{DbmsProbeEngine, ProbeError};
 pub use types::{ProbeResult, ProbeType, SqlContext, SqlDialect, SqlAnalysisResult, ClauseCoverage, AggregatedDetection};
 pub use rules::{SqlDetectionRule, SqlRuleRegistry, SqlEngineError};
+pub use assessment::{AssessmentBuilder, AssessmentError, Limitation, LimitationCategory, Repeatability, SqlInjectionAssessment};
+pub use false_positive::{run_checks, ContradictionKind, FalsePositiveReport, FalsePositiveSignals};
+pub use hypothesis::{ContextHypothesis, HypothesisEvidence, QueryPosition};
+pub use oob::{InteractionType, OobCorrelation, OobCorrelator, OobInteraction, OobToken};
+pub use second_order::{SecondOrderTrace, StorageContext, TraceId, TraceRegistry};
 
 /// Run the full SQL analysis pipeline: DBMS detection + clause mapping.
 ///

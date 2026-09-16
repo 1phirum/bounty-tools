@@ -11,6 +11,8 @@ pub enum DbmsFamily {
     MSSQL,
     Oracle,
     SQLite,
+    DB2,
+    H2,
 }
 
 impl DbmsFamily {
@@ -21,6 +23,8 @@ impl DbmsFamily {
         DbmsFamily::MSSQL,
         DbmsFamily::Oracle,
         DbmsFamily::SQLite,
+        DbmsFamily::DB2,
+        DbmsFamily::H2,
     ];
 
     pub fn label(&self) -> &'static str {
@@ -31,6 +35,8 @@ impl DbmsFamily {
             DbmsFamily::MSSQL => "Microsoft SQL Server",
             DbmsFamily::Oracle => "Oracle Database",
             DbmsFamily::SQLite => "SQLite",
+            DbmsFamily::DB2 => "IBM Db2",
+            DbmsFamily::H2 => "H2 Database",
         }
     }
 
@@ -357,7 +363,11 @@ pub fn analyze_error_body(body: &str) -> DbmsDetectionResult {
     let mut signals: Vec<FiredSignal> = Vec::new();
     let mut scores: HashMap<DbmsFamily, u32> = HashMap::new();
 
-    for signal in DETECTION_SIGNALS {
+    for signal in DETECTION_SIGNALS
+        .iter()
+        .chain(crate::dbms_ext::DB2_SIGNALS.iter())
+        .chain(crate::dbms_ext::H2_SIGNALS.iter())
+    {
         if lower.contains(signal.needle) {
             let score = scores.entry(signal.dbms).or_insert(0);
             *score = (*score + signal.weight).min(100);

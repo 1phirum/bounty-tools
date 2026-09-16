@@ -87,13 +87,36 @@ silently faked in the UI.
 | Information-gain estimation beyond discrimination overlap | **PARTIAL** | heuristic overlap scoring; formal entropy not implemented |
 | Concurrency/rate limits surfaced in SQL scheduler | **PARTIAL** | enforced in `bugtools-http`; not yet surfaced here |
 
-## Phase 5 — Second-order, API/GraphQL intelligence
-
-All **TODO**.
-
 ## Phase 6 — sqlmap adapter, hybrid backend
 
 All **TODO**. No `SqlBackend` trait yet.
+
+## Phase 5 — Second-order, API/GraphQL intelligence
+
+| Feature | Status | Notes |
+|---|---|---|
+| Second-order trace model (origin → storage → trigger → sink → observation) | **DONE** | `second_order.rs`; `is_complete()` requires every link + repeatable + matching trace ID |
+| Trace registry separating complete from incomplete chains | **DONE** | `second_order.rs` |
+| Storage context classification | **DONE** | `StorageContext` enum |
+| GraphQL variable/argument discovery | **TODO** | |
+| Multi-request workflow execution | **TODO** | model exists; no executor |
+
+## Advanced capability integration (2026-09-16 brief)
+
+| Feature | Status | Notes |
+|---|---|---|
+| Probabilistic context hypothesis w/ alternatives + ambiguity | **DONE** | `hypothesis.rs` |
+| Query-position classification (WHERE/ORDER BY/JOIN/…) | **DONE** | `QueryPosition` |
+| DB2 + H2 fingerprint signals | **DONE** | `dbms_ext.rs`, wired into `analyze_error_body` |
+| OOB token minting + windowed correlation | **DONE** | `oob.rs`; unknown/out-of-window tokens rejected |
+| OOB callback infrastructure (a listener) | **TODO** | tokens/correlator exist; no listener binary |
+| False-positive contradiction checks (11 kinds) | **DONE** | `false_positive.rs`; severe kinds block a finding |
+| Mandatory-limitations assessment model | **DONE** | `assessment.rs`; `build()` rejects a finding with no limitations |
+| CLI `sqli` command | **DONE** | `apps/bugtools-cli`; requires `--i-authorize` |
+| Causal experiment engine (dedicated crate) | **PARTIAL** | `controls/` + `differential/` cover part; no dedicated causal module |
+| Union column-count inference | **PARTIAL** | union generator exists; no column-count inference |
+| Stacked-query capability detection | **TODO** | |
+| Cache/WAF/session dedicated submodules | **PARTIAL** | `waf/` exists; `false_positive.rs` adds the checks |
 
 ## Phase 7 — Professional UI, reporting, persistence
 
