@@ -5,7 +5,6 @@
 //! limitations are mandatory whenever a finding is asserted.
 
 use crate::confidence::{ConfidenceAssessment, ConfidenceLevel};
-use crate::context::XssContext;
 use crate::exploitability::{ExploitabilityMachine, ExploitabilityStage, StageTransition};
 use crate::parser::{HtmlParseContext, JavaScriptParseContext};
 use crate::strategy::RenderingModel;
@@ -36,7 +35,6 @@ pub struct XssAssessment {
     pub rendering_model: RenderingModel,
 
     pub reflection: Option<AssessmentReflection>,
-    pub context: Option<XssContext>,
 
     pub exploitability_stage: ExploitabilityStage,
     pub transitions: Vec<StageTransition>,
@@ -72,7 +70,6 @@ impl AssessmentBuilder {
                 technology: Vec::new(),
                 rendering_model: RenderingModel::Unknown,
                 reflection: None,
-                context: None,
                 exploitability_stage: ExploitabilityStage::NotObserved,
                 transitions: Vec::new(),
                 confidence: ConfidenceAssessment {
@@ -106,11 +103,6 @@ impl AssessmentBuilder {
 
     pub fn reflection(mut self, r: AssessmentReflection) -> Self {
         self.assessment.reflection = Some(r);
-        self
-    }
-
-    pub fn context(mut self, c: XssContext) -> Self {
-        self.assessment.context = Some(c);
         self
     }
 

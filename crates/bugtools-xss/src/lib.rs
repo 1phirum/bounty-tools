@@ -16,7 +16,6 @@
 
 pub mod assessment;
 pub mod confidence;
-pub mod context;
 pub mod exploitability;
 pub mod parser;
 pub mod engine;
@@ -38,9 +37,9 @@ pub use sink::{detect_sinks, SinkRisk, SinkTarget};
 pub use source::{detect_sources, SourceKind};
 pub use taint::{build_graph, TaintFlow, TaintGraph};
 pub use confidence::{calibrate, confirm_on_execution, ConfidenceAssessment, ConfidenceLevel, EvidenceScore};
-pub use parser::{parse_at, HtmlNodeType, HtmlParseContext, JavaScriptNodeType, JavaScriptParseContext};
-pub use context::{
-    analyze_context, ContextType, Reflection, ReflectionEncoding, XssContext,
+pub use parser::{
+    parse_at, ContextMethod, HtmlNodeType, HtmlParseContext, JavaScriptNodeType,
+    JavaScriptParseContext,
 };
 pub use strategy::{build_strategy, RenderingModel, StrategyItem, XssStrategy};
 pub use technology::{
@@ -83,17 +82,13 @@ mod integration_tests {
             .iter()
             .any(|i| i.focus.contains("hydration") || i.focus.contains("__NEXT_DATA__")));
 
-        // 3. Classify a reflection context.
+        // 3. Classify a reflection context with the real parser.
         let response = r#"<a href="/x?q=PAYLOAD">link</a>"#;
         let offset = response.find("PAYLOAD").unwrap();
-        let reflection = Reflection {
-            offset,
-            submitted: "PAYLOAD".into(),
-            reflected: "PAYLOAD".into(),
-            encoding: ReflectionEncoding::Exact,
-        };
-        let ctx = analyze_context(response, &reflection);
-        assert_eq!(ctx.context_type, ContextType::UrlAttribute);
+        let ctx = parse_at(response, offset, "PAYLOAD");
+        assert_eq!(ctx.node_type, HtmlNodeType::QuotedAttribute);
+        assert_eq!(ctx.attribute_name.as_deref(), Some("href"));
+        assert_eq!(ctx.method, ContextMethod::Parsed);
 
         // 4. A reflection is NOT a finding.
         assert!(!ExploitabilityStage::Reflected.is_finding());
