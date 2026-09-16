@@ -10,6 +10,11 @@ pub mod waf;
 pub mod controls;
 pub mod differential;
 
+// Phase 1 of the research-engine brief: complete request model, cookie
+// jar, raw HTTP import/export, and parameter type intelligence.
+pub mod parameter;
+pub mod request;
+
 pub use clause_map::ClauseVariant;
 pub use detection::{DbmsFamily, DetectionVerdict, FiredSignal, SignalCategory};
 pub use probe::{DbmsProbeEngine, ProbeError};
