@@ -159,6 +159,47 @@ pub fn build_strategy(findings: &[TechnologyFinding]) -> XssStrategy {
         }
     }
 
+    // Derive the rendering model from categories when no framework-specific
+    // rule fired. A server-side template/admin stack renders HTML on the
+    // server; a client framework implies a SPA. Deterministic and derived
+    // from what was detected, never guessed.
+    if matches!(rendering_model, RenderingModel::Unknown) {
+        let has_frontend_framework = findings
+            .iter()
+            .any(|f| f.category == TechCategory::FrontendFramework);
+        let has_server_rendering = findings.iter().any(|f| {
+            matches!(
+                f.category,
+                TechCategory::TemplateEngine
+                    | TechCategory::BackendFramework
+                    | TechCategory::Cms
+                    | TechCategory::WebServer
+            )
+        });
+        rendering_model = if has_frontend_framework {
+            RenderingModel::ClientSideSpa
+        } else if has_server_rendering {
+            RenderingModel::ServerSideHtml
+        } else {
+            RenderingModel::Unknown
+        };
+    }
+
+    // A server-rendered stack with no specific rule still deserves the
+    // generic server-side investigation items rather than an empty strategy.
+    if items.is_empty() && rendering_model == RenderingModel::ServerSideHtml {
+        items.push(StrategyItem {
+            focus: "reflected value in server-rendered HTML output".into(),
+            rationale: "server-rendered stack detected; check output escaping in each context".into(),
+            priority: 0.7,
+        });
+        items.push(StrategyItem {
+            focus: "attribute and JavaScript context escaping".into(),
+            rationale: "server templates often escape HTML text but not attribute/JS contexts".into(),
+            priority: 0.6,
+        });
+    }
+
     // A WAF is not a rendering model but does change testing: representation
     // variation matters more, and blocks must not read as findings.
     if findings.iter().any(|f| f.category == TechCategory::Waf) {

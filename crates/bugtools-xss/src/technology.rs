@@ -193,6 +193,19 @@ const SIGNATURES: &[Signature] = &[
     Signature { technology: "IIS", category: TechCategory::WebServer, needle: "server: microsoft-iis", weight: 0.9, header_only: None, version_regex: Some(r"Microsoft-IIS/([0-9]+\.[0-9]+)") },
     Signature { technology: "LiteSpeed", category: TechCategory::WebServer, needle: "server: litespeed", weight: 0.85, header_only: None, version_regex: None },
     Signature { technology: "Caddy", category: TechCategory::WebServer, needle: "server: caddy", weight: 0.85, header_only: None, version_regex: None },
+    // Python WSGI/ASGI servers — the Server header names the runtime directly.
+    Signature { technology: "gunicorn", category: TechCategory::WebServer, needle: "server: gunicorn", weight: 0.9, header_only: None, version_regex: Some(r"gunicorn/([0-9]+\.[0-9]+(?:\.[0-9]+)?)") },
+    Signature { technology: "uvicorn", category: TechCategory::WebServer, needle: "server: uvicorn", weight: 0.9, header_only: None, version_regex: None },
+    Signature { technology: "Waitress", category: TechCategory::WebServer, needle: "server: waitress", weight: 0.85, header_only: None, version_regex: None },
+    Signature { technology: "Werkzeug", category: TechCategory::WebServer, needle: "server: werkzeug", weight: 0.85, header_only: None, version_regex: Some(r"Werkzeug/([0-9]+\.[0-9]+(?:\.[0-9]+)?)") },
+    // Flask-specific markers. Flask/Werkzeug clears the session cookie by
+    // setting an epoch expiry; the exact attribute order varies, so we match
+    // the stable pairing of a `session=` cookie cleared to 1970.
+    Signature { technology: "Flask", category: TechCategory::BackendFramework, needle: "session=; expires=thu, 01 jan 1970", weight: 0.5, header_only: None, version_regex: None },
+    Signature { technology: "Flask", category: TechCategory::BackendFramework, needle: "gunicorn", weight: 0.3, header_only: None, version_regex: None },
+    // Common admin-theme asset paths (weak alone, corroborating together).
+    Signature { technology: "Metronic admin theme", category: TechCategory::StaticPipeline, needle: "/static/assets/admin/pages/", weight: 0.5, header_only: None, version_regex: None },
+    Signature { technology: "Metronic admin theme", category: TechCategory::StaticPipeline, needle: "/static/assets/global/plugins/", weight: 0.5, header_only: None, version_regex: None },
 
     // ── CDN / WAF ──
     Signature { technology: "Cloudflare", category: TechCategory::Cdn, needle: "cf-ray", weight: 0.95, header_only: Some("cf-ray"), version_regex: None },
@@ -230,6 +243,43 @@ const SIGNATURES: &[Signature] = &[
     Signature { technology: "Handlebars", category: TechCategory::TemplateEngine, needle: "handlebars", weight: 0.4, header_only: None, version_regex: None },
     Signature { technology: "Jinja2", category: TechCategory::TemplateEngine, needle: "jinja", weight: 0.4, header_only: None, version_regex: None },
 ];
+
+/// Extract a short, readable fragment around the matched needle, preferring
+/// the version string when one was captured. Never returns the whole body.
+fn matched_fragment(value: &str, needle: &str, version: Option<&str>) -> String {
+    /// Maximum characters to keep.
+    const MAX: usize = 160;
+    if value.chars().count() <= MAX && !value.contains('\n') {
+        return value.to_string();
+    }
+    let lower = value.to_lowercase();
+    // Prefer the version substring: it is the most informative part.
+    let anchor = version
+        .and_then(|v| value.find(v).map(|i| (i, i + v.len())))
+        .or_else(|| {
+            // Otherwise anchor on the first needle token (e.g. "gunicorn").
+            let token = needle
+                .split_whitespace()
+                .last()
+                .unwrap_or(needle)
+                .to_lowercase();
+            lower.find(&token).map(|i| (i, i + token.len()))
+        })
+        .unwrap_or((0, value.len().min(MAX)));
+
+    let start = anchor.0.saturating_sub(40);
+    let end = (anchor.1 + 80).min(value.len());
+    let mut fragment: String = value[start..end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if fragment.chars().count() > MAX {
+        fragment = fragment.chars().take(MAX).collect();
+    }
+    let prefix = if start > 0 { "…" } else { "" };
+    let suffix = if end < value.len() { "…" } else { "" };
+    format!("{prefix}{fragment}{suffix}")
+}
 
 /// Minimum corroboration weight before a technology is reported at all.
 const MIN_TECH_CONFIDENCE: f32 = 0.6;
@@ -297,14 +347,20 @@ pub fn detect(observations: &[Observation]) -> Vec<TechnologyFinding> {
             }
 
             entry.weight += sig.weight;
-            entry.observations.push((obs.source, obs.value.clone(), sig.needle.to_string()));
+            // Record only the matched fragment (with a little context), never
+            // the whole response body: dumping an 8KB page is unreadable and
+            // risks surfacing sensitive response content.
+            let fragment = matched_fragment(&obs.value, &sig.needle, version.as_deref());
+            entry
+                .observations
+                .push((obs.source, fragment.clone(), sig.needle.to_string()));
             entry.evidence.push(TechnologyEvidence {
                 technology: sig.technology.to_string(),
                 category: sig.category,
                 version: version.clone(),
                 confidence: sig.weight,
                 evidence_source: obs.source,
-                evidence_value: obs.value.clone(),
+                evidence_value: fragment,
             });
             if version.is_some() && entry.version.is_none() {
                 entry.version = version;
@@ -514,6 +570,81 @@ mod tests {
         let findings = detect(&obs);
         for w in findings.windows(2) {
             assert!(w[0].confidence >= w[1].confidence);
+        }
+    }
+
+    #[test]
+    fn evidence_value_is_a_fragment_not_the_whole_body() {
+        // A large HTML body must not be dumped into the evidence value.
+        let big = format!("<html>{}\n<div class=\"svelte-x\"></div></html>", "filler ".repeat(500));
+        let obs = vec![Observation::body(&big)];
+        let findings = detect(&obs);
+        for f in &findings {
+            for e in &f.evidence {
+                assert!(
+                    e.evidence_value.chars().count() <= 200,
+                    "evidence value was {} chars — should be a fragment",
+                    e.evidence_value.chars().count()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gunicorn_server_header_detected() {
+        let obs = vec![Observation::header("server", "gunicorn")];
+        let findings = detect(&obs);
+        let g = findings.iter().find(|f| f.technology == "gunicorn").unwrap();
+        assert!(g.confidence >= 0.9);
+    }
+
+    #[test]
+    fn flask_detected_when_weak_markers_corroborate() {
+        // Either weak marker alone stays under the threshold; together they
+        // corroborate to identify Flask.
+        let one = detect(&[Observation::header(
+            "set-cookie",
+            "session=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/",
+        )]);
+        assert!(
+            !one.iter().any(|f| f.technology == "Flask"),
+            "a single weak marker must not report Flask"
+        );
+
+        let both = detect(&[
+            Observation::header("server", "gunicorn"),
+            Observation::header(
+                "set-cookie",
+                "session=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/",
+            ),
+        ]);
+        assert!(
+            both.iter().any(|f| f.technology == "Flask"),
+            "corroborating markers should identify Flask: {:?}",
+            both.iter().map(|f| &f.technology).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn metronic_theme_detected_from_static_paths() {
+        let obs = vec![
+            Observation::body("<link href='/static/assets/admin/pages/css/x.css'>"),
+            Observation::body("<script src='/static/assets/global/plugins/jquery.js'>"),
+        ];
+        let findings = detect(&obs);
+        assert!(findings.iter().any(|f| f.technology == "Metronic admin theme"));
+    }
+
+    #[test]
+    fn version_fragment_prefers_the_version_string() {
+        let big = format!("{}gunicorn/21.2.0{}", "a".repeat(300), "b".repeat(300));
+        let obs = vec![Observation::header("server", &big)];
+        let findings = detect(&obs);
+        if let Some(g) = findings.iter().find(|f| f.technology == "gunicorn") {
+            assert_eq!(g.version.as_deref(), Some("21.2.0"));
+            let ev = &g.evidence[0].evidence_value;
+            assert!(ev.contains("21.2.0"), "fragment should include the version: {ev}");
+            assert!(ev.chars().count() <= 200);
         }
     }
 

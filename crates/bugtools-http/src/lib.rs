@@ -95,7 +95,19 @@ impl SafeHttpClient {
                 && Duration::try_from_secs_f64(1.0 / config.rate_limit_rps).is_ok(),
             "HTTP rate must be finite, positive, and have a representable wait"
         );
-        let client = Client::builder()
+        // Honor the platform/user CA configuration. Without this, BugTools
+        // cannot talk through a TLS-intercepting proxy (corporate MITM, or a
+        // sandbox egress proxy) because rustls trusts only its bundled roots.
+        // We read the standard environment variables curl and Python use.
+        let mut builder = Client::builder();
+        if let Some(ca_path) = ca_bundle_path() {
+            if let Ok(pem) = std::fs::read(&ca_path) {
+                for cert in reqwest::Certificate::from_pem_bundle(&pem).unwrap_or_default() {
+                    builder = builder.add_root_certificate(cert);
+                }
+            }
+        }
+        let client = builder
             .timeout(config.timeout)
             // Redirect destinations have not been scope-checked. Return 3xx
             // to the caller; any follow-up must be an independently checked request.
@@ -411,4 +423,35 @@ mod tests {
             ..HttpClientConfig::default()
         });
     }
+}
+
+/// Resolve the CA bundle to trust, following the conventions curl and Python
+/// use. Explicit env vars win; otherwise fall back to well-known system paths.
+///
+/// Returns `None` when nothing is found, in which case the client keeps its
+/// bundled root set (the previous behaviour).
+fn ca_bundle_path() -> Option<std::path::PathBuf> {
+    // 1. Explicit overrides, in the order curl/OpenSSL honour them.
+    for var in ["SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "AWS_CA_BUNDLE"] {
+        if let Ok(value) = std::env::var(var) {
+            let path = std::path::PathBuf::from(value);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    // 2. Well-known system locations (Debian/Ubuntu, RHEL/Fedora).
+    for candidate in [
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/ssl/cert.pem",
+    ] {
+        let path = std::path::PathBuf::from(candidate);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    // 3. SSL_CERT_DIR (a hashed directory rather than a bundle) is not read
+    //    here; reqwest's rustls backend does not accept a directory.
+    None
 }
