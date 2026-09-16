@@ -1,8 +1,20 @@
 //! `bugtools tech` — technology fingerprint + XSS analysis pipeline.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use bugtools_core::http::HttpRequest;
+use bugtools_core::scope::{ScopeRule, ScopeRuleType};
+use bugtools_http::{HttpClientConfig, HttpEngineError, SafeHttpClient};
+use bugtools_scope::ScopeEngine;
+use std::collections::HashMap;
+use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::parsing::{apply_identity_header, resolve_cookies, resolve_headers};
+
+/// Default UA, unless the caller supplies their own via `-H`.
+const USER_AGENT: &str = "Mozilla/5.0 (compatible; BugTools/0.1)";
+/// Bound manual redirect following; the safe client itself never follows.
+const MAX_REDIRECTS: usize = 5;
 
 pub async fn run(
     url: &str,
@@ -71,25 +83,32 @@ pub async fn run(
         header_map.insert("Cookie".to_string(), cookie_header);
     }
 
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (compatible; BugTools/0.1)")
-        .timeout(std::time::Duration::from_secs(20))
-        .build()?;
+    // Default UA unless the caller overrode it.
+    header_map
+        .entry("User-Agent".to_string())
+        .or_insert_with(|| USER_AGENT.to_string());
 
-    let mut request = client.get(url);
-    for (k, v) in &header_map {
-        request = request.header(k, v);
-    }
-    let response = request.send().await?;
-    let status = response.status();
+    // Every request goes through the shared safe client: scope-checked,
+    // rate-limited, budget-capped and size-bounded. No ad-hoc transport.
+    let scope = Arc::new(ScopeEngine::new());
+    scope.add_rule(ScopeRule::new(
+        Uuid::nil(),
+        ScopeRuleType::IncludeDomain,
+        parsed.host_str().unwrap_or("").to_string(),
+    ));
+    let http = SafeHttpClient::new(
+        scope,
+        HttpClientConfig {
+            timeout: std::time::Duration::from_secs(20),
+            ..Default::default()
+        },
+    );
 
-    let mut header_vec: Vec<(String, String)> = response
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect();
+    let fetched = fetch(&http, url, &header_map).await?;
+    let status = fetched.status;
+    let mut header_vec = fetched.headers;
     header_vec.sort();
-    let body = response.text().await.unwrap_or_default();
+    let body = fetched.body;
 
     let script_srcs = bugtools_xss::technology::extract_script_srcs(&body);
     let observations =
@@ -151,8 +170,8 @@ pub async fn run(
         u.query_pairs_mut().append_pair("bugtools_probe", &probe);
         u.to_string()
     };
-    let probe_body = match client.get(&probe_url).send().await {
-        Ok(r) => r.text().await.unwrap_or_default(),
+    let probe_body = match fetch(&http, &probe_url, &header_map).await {
+        Ok(f) => f.body,
         Err(e) => {
             eprintln!("[!] probe request failed: {e}");
             body.clone()
@@ -217,4 +236,69 @@ pub async fn run(
         }
     }
     Ok(())
+}
+
+/// One fetched page: everything the XSS pipeline needs from a response.
+struct Fetched {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+/// Fetch through the safe client, following redirects only while the next
+/// hop stays in scope. The safe client never follows redirects itself, so
+/// this preserves the old behaviour without ever requesting an unchecked
+/// host: an out-of-scope redirect target is an error, not a silent hop.
+async fn fetch(
+    http: &SafeHttpClient,
+    url: &str,
+    headers: &HashMap<String, String>,
+) -> Result<Fetched> {
+    let mut current = url.to_string();
+    for _ in 0..=MAX_REDIRECTS {
+        let req = HttpRequest {
+            id: Uuid::new_v4(),
+            job_id: None,
+            url: current.clone(),
+            method: "GET".to_string(),
+            headers: headers.clone(),
+            body: None,
+            timestamp: chrono::Utc::now(),
+        };
+        let resp = match http.execute(req).await {
+            Ok(r) => r,
+            Err(HttpEngineError::OutOfScope(reason)) => {
+                return Err(anyhow!("refusing to follow redirect out of scope: {reason}"))
+            }
+            // A budget/rate/size failure is reported, never swallowed.
+            Err(e) => return Err(anyhow!("{e}")),
+        };
+
+        if (300..400).contains(&resp.status_code) {
+            if let Some(loc) = resp
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+                .map(|(_, v)| v.clone())
+            {
+                if let Ok(next) =
+                    url::Url::parse(&current).and_then(|base| base.join(&loc))
+                {
+                    let next = next.to_string();
+                    if next != current {
+                        eprintln!("[*] redirect {current} -> {next}");
+                        current = next;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        return Ok(Fetched {
+            status: resp.status_code,
+            headers: resp.headers.into_iter().collect(),
+            body: resp.body,
+        });
+    }
+    Err(anyhow!("exceeded {MAX_REDIRECTS} redirects from {url}"))
 }
