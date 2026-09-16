@@ -10,6 +10,44 @@ cargo build -p bugtools-cli --release
 # binary at target/release/bugtools
 ```
 
+## Aliases and short flags
+
+Every command has a short alias, and common options have short flags. Type
+`bugtools <command> --help` for per-command examples.
+
+| Command | Alias | Purpose |
+|---|---|---|
+| `target` | `t` | normalize a target (offline) |
+| `discover` | `d` | subdomain discovery |
+| `resolve` | `r` | DNS records |
+| `pipeline` | `p` | full recon pipeline |
+| `sql` | `s` | SQL research engine |
+| `tech` | `x` | technology / XSS-strategy fingerprint |
+| `payload` | `gen` | inspect payload generation (sends nothing) |
+| `sqli` | `q` | assess SQLi candidates |
+
+SQL subcommands: `detect` → `id`, `clauses` → `ref`, `analyze` → `a`.
+
+| Flag | Short | Meaning |
+|---|---|---|
+| `--i-authorize` | `-y` | explicit authorization to probe |
+| `--cookie` | `-c` | inline cookies or a file path |
+| `--header` | `-H` | extra header (`Name: value`) |
+| `--bearer` | `-b` | bearer token |
+| `--input` | `-i` | candidates JSON file |
+| `--param` | `-p` | parameter to probe |
+| `--output` | `-o` | write results here |
+| `--format` | `-f` | `text` or `json` |
+| `--depth` | `-d` | `recon` / `confirm` / `explore` |
+| `--json` | `-j` | JSON output |
+
+```sh
+bugtools x https://example.com -y            # fingerprint, authorized
+bugtools s a "https://t/item?id=1" -y -c cookies.txt
+bugtools q -i endpoints.json -y -d confirm
+bugtools gen --clause where --quote single -j
+```
+
 ## Commands
 
 ### `bugtools target <input>`
