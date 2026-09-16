@@ -33,6 +33,12 @@ pub mod hypothesis;
 pub mod oob;
 pub mod second_order;
 
+// P0 brief (2026-09-16): typed payload generation with boundaries and a
+// safety gate, plus WAF vendor signatures and edge/application layer
+// classification.
+pub mod payload;
+pub mod safety;
+
 pub use clause_map::ClauseVariant;
 pub use detection::{DbmsFamily, DetectionVerdict, FiredSignal, SignalCategory};
 pub use probe::{DbmsProbeEngine, ProbeError};
@@ -43,6 +49,8 @@ pub use false_positive::{run_checks, ContradictionKind, FalsePositiveReport, Fal
 pub use hypothesis::{ContextHypothesis, HypothesisEvidence, QueryPosition};
 pub use oob::{InteractionType, OobCorrelation, OobCorrelator, OobInteraction, OobToken};
 pub use second_order::{SecondOrderTrace, StorageContext, TraceId, TraceRegistry};
+pub use payload::{Boundary, GenerationContext, PayloadCandidate, QuoteMode};
+pub use safety::{SafetyLevel, SafetyPolicy, SafetyVerdict};
 
 /// Run the full SQL analysis pipeline: DBMS detection + clause mapping.
 ///
