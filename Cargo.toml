@@ -12,6 +12,7 @@ members = [
     "crates/bugtools-scheduler",
     "crates/bugtools-sql",
     "crates/bugtools-parser",
+    "crates/bugtools-xss",
     "crates/bugtools-dns",
     "crates/bugtools-discovery",
     "crates/bugtools-crawler",

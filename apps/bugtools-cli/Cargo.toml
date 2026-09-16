@@ -19,6 +19,7 @@ bugtools-scope = { path = "../../crates/bugtools-scope" }
 bugtools-runtime = { path = "../../crates/bugtools-runtime" }
 bugtools-output = { path = "../../crates/bugtools-output" }
 bugtools-sql = { path = "../../crates/bugtools-sql" }
+bugtools-xss = { path = "../../crates/bugtools-xss" }
 clap = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -27,5 +28,6 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 url = { workspace = true }
 anyhow = "1.0"
+reqwest = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

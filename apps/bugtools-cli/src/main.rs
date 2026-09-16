@@ -66,6 +66,26 @@ enum Commands {
         #[command(subcommand)]
         command: SqlCommands,
     },
+    /// Fingerprint a target's technology stack from a live response.
+    Tech {
+        /// URL to fingerprint.
+        url: String,
+        /// Authorize this host for the request.
+        #[arg(long)]
+        i_authorize: bool,
+        /// Cookies (inline list or file path).
+        #[arg(long = "cookie", value_delimiter = ';')]
+        cookies: Vec<String>,
+        /// Extra headers as `Name: value`.
+        #[arg(long = "header")]
+        headers: Vec<String>,
+        /// Bearer token.
+        #[arg(long)]
+        bearer: Option<String>,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate and inspect adaptive payload candidates without sending them.
     Payload {
         /// SQL clause/context: where, having, order_by, group_by, join, like,
@@ -344,6 +364,17 @@ async fn main() -> Result<()> {
             run_sql_command(command).await?;
         }
 
+        Commands::Tech {
+            url,
+            i_authorize,
+            cookies,
+            headers,
+            bearer,
+            json,
+        } => {
+            run_tech_command(&url, i_authorize, &cookies, &headers, bearer.as_deref(), json).await?;
+        }
+
         Commands::Payload {
             clause,
             quote,
@@ -530,7 +561,7 @@ async fn run_sqli_command(
             header_map.keys().cloned().collect::<Vec<_>>().join(", ")
         );
     }
-    let budget = bugtools_sql::scheduler::RequestBudget::new(max_requests);
+    let _budget = bugtools_sql::scheduler::RequestBudget::new(max_requests);
     println!("[*] request budget: {max_requests}");
 
     let raw = std::fs::read_to_string(input_path)
@@ -852,6 +883,110 @@ async fn run_sql_command(command: SqlCommands) -> Result<()> {
                     }
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// Fingerprint a target's technology stack and print the derived strategy.
+async fn run_tech_command(
+    url: &str,
+    authorize: bool,
+    cli_cookies: &[String],
+    header_flags: &[String],
+    bearer: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    if !authorize {
+        anyhow::bail!(
+            "refusing to request without --i-authorize.\n\
+             This flag is your explicit confirmation that you are authorized to test this target."
+        );
+    }
+    let parsed = url::Url::parse(url).map_err(|e| anyhow::anyhow!("invalid URL: {e}"))?;
+    if parsed.host_str().is_none() {
+        anyhow::bail!("URL has no host");
+    }
+
+    let cookie_pairs = resolve_cookies(cli_cookies, None)?;
+    let mut header_map = resolve_headers(header_flags, bearer)?;
+    if !cookie_pairs.is_empty() {
+        let cookie_header = cookie_pairs
+            .iter()
+            .map(|(n, v)| format!("{n}={v}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        header_map.insert("Cookie".to_string(), cookie_header);
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (compatible; BugTools/0.1)")
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+
+    let mut request = client.get(url);
+    for (k, v) in &header_map {
+        request = request.header(k, v);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+
+    let mut header_vec: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+    // Reqwest may fold multiple Set-Cookie values; keep them as observed.
+    header_vec.sort();
+    let body = response.text().await.unwrap_or_default();
+
+    let script_srcs = bugtools_xss::technology::extract_script_srcs(&body);
+    let observations = bugtools_xss::observations_from_response(&header_vec, &body, &script_srcs);
+    let findings = bugtools_xss::detect(&observations);
+    let strategy = bugtools_xss::build_strategy(&findings);
+
+    if json {
+        let payload = serde_json::json!({
+            "url": url,
+            "technologies": findings,
+            "strategy": {
+                "rendering_model": strategy.rendering_model,
+                "driven_by": strategy.driven_by,
+                "items": strategy.items,
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    println!("[*] fingerprinting {} (HTTP {})", url, status);
+    println!();
+    if findings.is_empty() {
+        println!("No technology crossed the reporting threshold.");
+        println!("note: this is absence of evidence, not evidence of absence —");
+        println!("      most markers require multiple corroborating signals.");
+    } else {
+        println!("TECHNOLOGIES ({}):", findings.len());
+        for f in &findings {
+            println!("  {:<24} {:<22} {}", f.technology, format!("{:?}", f.category), match &f.version {
+                Some(v) => format!("v{v} (observed)"),
+                None => "version not observed".to_string(),
+            });
+            for e in &f.evidence {
+                println!("      · {} = {:?}", e.evidence_source.label(), e.evidence_value);
+            }
+        }
+    }
+
+    println!();
+    println!("RENDERING MODEL: {:?}", strategy.rendering_model);
+    if strategy.is_generic() {
+        println!("STRATEGY: generic (no technology-specific guidance)");
+    } else {
+        println!("XSS STRATEGY ({} item(s)):", strategy.items.len());
+        for item in &strategy.items {
+            println!("  [{:.2}] {}", item.priority, item.focus);
+            println!("         {}", item.rationale);
         }
     }
     Ok(())
