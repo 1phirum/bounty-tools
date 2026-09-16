@@ -37,6 +37,24 @@ pub struct UrlEvent {
     pub depth: u32,
 }
 
+/// The result of an XSS assessment for one endpoint. Deliberately compact
+/// and self-contained: `bugtools-output` must not depend on the XSS engine,
+/// so this carries only what a consumer needs to render or store the result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XssAssessmentEvent {
+    pub target: String,
+    pub endpoint: String,
+    pub parameter: Option<String>,
+    /// The exploitability stage label, e.g. `EXECUTION_CONFIRMED`.
+    pub stage: String,
+    /// True only when execution was confirmed by browser evidence.
+    pub confirmed: bool,
+    /// The confidence level label.
+    pub confidence: String,
+    /// Stated weaknesses of the assessment, if any.
+    pub limitations: Vec<String>,
+}
+
 /// Everything the pipeline emits, in order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -47,6 +65,7 @@ pub enum PipelineEvent {
     DnsResolved(DnsEvent),
     HttpObserved(HttpEvent),
     UrlDiscovered(UrlEvent),
+    XssAssessed(XssAssessmentEvent),
     CrawlComplete { urls: usize, pages: usize },
     Warning(String),
     Error(String),

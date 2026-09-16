@@ -116,6 +116,51 @@ pub async fn run(
     let findings = bugtools_xss::detect(&observations);
     let strategy = bugtools_xss::build_strategy(&findings);
 
+    // Full XSS analysis: submit a benign marker as a query parameter in ONE
+    // additional request, then analyze the reflection of that marker. The
+    // marker contains no markup, so this cannot itself constitute an attack.
+    let probe = format!("btprobe{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let probe_url = {
+        let mut u = parsed.clone();
+        u.query_pairs_mut().append_pair("bugtools_probe", &probe);
+        u.to_string()
+    };
+    let probe_body = match fetch(&http, &probe_url, &header_map).await {
+        Ok(f) => f.body,
+        Err(e) => {
+            eprintln!("[!] probe request failed: {e}");
+            body.clone()
+        }
+    };
+    // Taint analysis runs on INLINE scripts — that is where DOM flows live.
+    let script_sources = bugtools_xss::technology::extract_inline_scripts(&probe_body);
+    let request = bugtools_xss::AnalyzeRequest {
+        url: url.to_string(),
+        parameter: "bugtools_probe".into(),
+        submitted: probe.clone(),
+        body: probe_body,
+        headers: header_vec.clone(),
+        script_sources,
+    };
+    let assessment = bugtools_xss::analyze(&request);
+
+    // The assessment as a pipeline event (the shape the runtime's XSS stage
+    // will emit) and, when execution is confirmed, a persistable finding.
+    let xss_event = bugtools_output::XssAssessmentEvent {
+        target: url.to_string(),
+        endpoint: assessment.endpoint.clone(),
+        parameter: assessment.parameter.clone(),
+        stage: assessment.exploitability_stage.label().to_string(),
+        confirmed: assessment.confirmed,
+        confidence: assessment.confidence.level.label().to_string(),
+        limitations: assessment.limitations.clone(),
+    };
+    // A finding exists only when execution was confirmed in a browser; the
+    // mapping enforces that, so this stays None until a verifier is wired.
+    let finding = assessment.to_finding(Uuid::nil());
+
+    // JSON mode: all analysis is complete. Emit the single document and stop;
+    // no human output may precede it or stdout is not valid JSON.
     if json {
         let payload = serde_json::json!({
             "url": url,
@@ -124,7 +169,9 @@ pub async fn run(
                 "rendering_model": strategy.rendering_model,
                 "driven_by": strategy.driven_by,
                 "items": strategy.items,
-            }
+            },
+            "xss": xss_event,
+            "finding": finding,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
@@ -160,34 +207,6 @@ pub async fn run(
 
     println!();
     println!("RENDERING MODEL: {:?}", strategy.rendering_model);
-
-    // Full XSS analysis: submit a benign marker as a query parameter in ONE
-    // additional request, then analyze the reflection of that marker. The
-    // marker contains no markup, so this cannot itself constitute an attack.
-    let probe = format!("btprobe{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-    let probe_url = {
-        let mut u = parsed.clone();
-        u.query_pairs_mut().append_pair("bugtools_probe", &probe);
-        u.to_string()
-    };
-    let probe_body = match fetch(&http, &probe_url, &header_map).await {
-        Ok(f) => f.body,
-        Err(e) => {
-            eprintln!("[!] probe request failed: {e}");
-            body.clone()
-        }
-    };
-    // Taint analysis runs on INLINE scripts — that is where DOM flows live.
-    let script_sources = bugtools_xss::technology::extract_inline_scripts(&probe_body);
-    let request = bugtools_xss::AnalyzeRequest {
-        url: url.to_string(),
-        parameter: "bugtools_probe".into(),
-        submitted: probe.clone(),
-        body: probe_body,
-        headers: header_vec.clone(),
-        script_sources,
-    };
-    let assessment = bugtools_xss::analyze(&request);
 
     println!();
     println!(
@@ -226,6 +245,16 @@ pub async fn run(
             println!("    - {l}");
         }
     }
+    if let Some(f) = &finding {
+        println!();
+        println!("FINDING  {:?} / {:?}", f.severity, f.confidence);
+        println!("  {}", f.title);
+        println!("  module: {}  technique: {}", f.module, f.technique);
+        if let Some(notes) = &f.notes {
+            println!("  {notes}");
+        }
+    }
+
     if strategy.is_generic() {
         println!("STRATEGY: generic (no technology-specific guidance)");
     } else {

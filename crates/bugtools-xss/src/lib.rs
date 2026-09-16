@@ -17,6 +17,7 @@
 pub mod assessment;
 pub mod confidence;
 pub mod exploitability;
+pub mod finding;
 pub mod parser;
 pub mod engine;
 pub mod reflection;

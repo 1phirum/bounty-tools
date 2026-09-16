@@ -55,6 +55,19 @@ impl EventSink for CliSink {
             PipelineEvent::UrlDiscovered(u) => {
                 println!("[url] depth {} {}", u.depth, u.url);
             }
+            PipelineEvent::XssAssessed(x) => {
+                let parameter = x.parameter.as_deref().unwrap_or("-");
+                println!(
+                    "[xss] {} param={} — {} (confidence {})",
+                    x.endpoint, parameter, x.stage, x.confidence
+                );
+                if x.confirmed {
+                    println!("      confirmed: execution observed in a browser");
+                }
+                for limitation in &x.limitations {
+                    println!("      limit: {limitation}");
+                }
+            }
             PipelineEvent::CrawlComplete { urls, pages } => {
                 println!("[+] crawl complete: {pages} pages fetched, {urls} URLs seen");
             }
