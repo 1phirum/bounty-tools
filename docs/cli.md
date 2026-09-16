@@ -122,11 +122,14 @@ boolean predicate.
 test authenticated surfaces exactly as you are logged in:
 
 ```sh
+# from a file — pass the path straight to --cookie
+bugtools sqli --input endpoints.json --i-authorize --cookie cookies.txt
+
 # inline cookies (repeatable, or one string with ; separators)
 bugtools sqli --input endpoints.json --i-authorize \
   --cookie "session=abc123" --cookie "tenant_id=42"
 
-# or from a file (a raw Cookie: header value, or name=value per line)
+# --cookie-file is equivalent and still supported
 bugtools sqli --input endpoints.json --i-authorize --cookie-file session.txt
 
 # custom headers and a bearer token

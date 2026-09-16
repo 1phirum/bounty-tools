@@ -104,12 +104,13 @@ enum Commands {
         /// Authorize the hosts in the input file for probing.
         #[arg(long)]
         i_authorize: bool,
-        /// Cookies to send, as `name=value` pairs (repeatable) or a single
-        /// `name=value; name2=value2` string.
+        /// Cookies to send. Accepts either an inline `name=value` list (use
+        /// `;` to separate several) or a path to a cookie file — the file is
+        /// read automatically when the argument names an existing file.
         #[arg(long = "cookie", value_delimiter = ';')]
         cookies: Vec<String>,
-        /// Load cookies from a file containing a `Cookie:` header value or
-        /// one `name=value` per line.
+        /// Explicit cookie-file flag, equivalent to passing a path to
+        /// `--cookie`. Kept for clarity.
         #[arg(long)]
         cookie_file: Option<String>,
         /// Extra headers as `Name: value` (repeatable).
@@ -400,29 +401,37 @@ async fn main() -> Result<()> {
 fn resolve_cookies(cli_cookies: &[String], cookie_file: Option<&str>) -> Result<Vec<(String, String)>> {
     let mut jar = bugtools_sql::request::CookieJar::new("cli");
 
-    for entry in cli_cookies {
-        for pair in entry.split(';') {
-            let pair = pair.trim();
-            if pair.is_empty() {
-                continue;
-            }
-            if let Some((name, value)) = pair.split_once('=') {
-                jar.import_pairs(&[(name.trim().to_string(), value.trim().to_string())]);
-            } else {
-                anyhow::bail!("invalid cookie '{pair}': expected name=value");
-            }
+    // Ingest one cookie source. If it names an existing file, read it;
+    // otherwise treat it as an inline `name=value` (or `;`-separated) list.
+    // This lets `--cookie cookies.txt` work without a separate flag.
+    fn ingest(source: &str, jar: &mut bugtools_sql::request::CookieJar) -> Result<()> {
+        let trimmed = source.trim();
+        if trimmed.is_empty() {
+            return Ok(());
         }
+
+        // File path? Only if it exists — an inline pair like "a=1" never
+        // collides with a real path because of the '='.
+        let path = std::path::Path::new(trimmed);
+        if path.is_file() {
+            let raw = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("cannot read cookie file {}: {e}", path.display()))?;
+            return ingest_contents(&raw, jar);
+        }
+
+        // Inline value: may itself contain a `;`-separated cookie header.
+        ingest_contents(trimmed, jar)
     }
 
-    if let Some(path) = cookie_file {
-        let raw = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("cannot read cookie file {path}: {e}"))?;
+    /// Parse cookie text: accepts a raw `Cookie:` header, `name=value`
+    /// pairs separated by `;`, or one `name=value` per line. Lines starting
+    /// with `#` are comments.
+    fn ingest_contents(raw: &str, jar: &mut bugtools_sql::request::CookieJar) -> Result<()> {
         for line in raw.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            // Strip a leading "Cookie:" if the researcher pasted a header.
             let line = line.strip_prefix("Cookie:").unwrap_or(line).trim();
             for pair in line.split(';') {
                 let pair = pair.trim();
@@ -431,9 +440,20 @@ fn resolve_cookies(cli_cookies: &[String], cookie_file: Option<&str>) -> Result<
                 }
                 if let Some((name, value)) = pair.split_once('=') {
                     jar.import_pairs(&[(name.trim().to_string(), value.trim().to_string())]);
+                } else {
+                    anyhow::bail!("invalid cookie '{pair}': expected name=value");
                 }
             }
         }
+        Ok(())
+    }
+
+    for entry in cli_cookies {
+        ingest(entry, &mut jar)?;
+    }
+
+    if let Some(source) = cookie_file {
+        ingest(source, &mut jar)?;
     }
 
     Ok(jar.export_pairs())
