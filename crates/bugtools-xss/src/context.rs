@@ -289,44 +289,6 @@ fn classify_from_prefix(before: &str) -> (ContextType, &'static str, &'static st
     (ContextType::HtmlText, "html", "defaulting to HTML text context")
 }
 
-/// The exploitability classification, kept strictly separate from mere
-/// reflection detection (brief §3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ExploitabilityStage {
-    /// Input appeared in the response.
-    Reflected,
-    /// The reflected input broke out of its context into markup.
-    HtmlInjection,
-    /// A DOM sink is reachable from the input.
-    DomReachability,
-    /// A dangerous sink was actually invoked.
-    SinkReached,
-    /// Execution was confirmed (browser or equivalent).
-    ExecutionConfirmed,
-    /// A mitigation (CSP/Trusted Types/sanitizer) blocked execution.
-    MitigationBlocked,
-}
-
-impl ExploitabilityStage {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Reflected => "REFLECTED",
-            Self::HtmlInjection => "HTML_INJECTION",
-            Self::DomReachability => "DOM_REACHABILITY",
-            Self::SinkReached => "SINK_REACHED",
-            Self::ExecutionConfirmed => "EXECUTION_CONFIRMED",
-            Self::MitigationBlocked => "MITIGATION_BLOCKED",
-        }
-    }
-
-    /// Whether this stage constitutes an actual XSS finding. Only confirmed
-    /// execution — or a reached sink with no mitigation — qualifies.
-    pub fn is_finding(&self) -> bool {
-        matches!(self, Self::ExecutionConfirmed)
-    }
-}
-
 /// A reflection alone is NOT a finding. This function states that explicitly
 /// and is used by the assessment layer.
 pub fn reflection_is_finding(encoding: ReflectionEncoding, context: ContextType) -> bool {
@@ -356,6 +318,7 @@ fn first_unquoted_equals(tag: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exploitability::ExploitabilityStage;
 
     fn reflection_at(body: &str, needle: &str) -> Reflection {
         let offset = body.find(needle).unwrap();

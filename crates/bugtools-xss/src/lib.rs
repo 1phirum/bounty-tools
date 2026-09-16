@@ -14,12 +14,23 @@
 //!   a finding.
 //! - An edge/WAF block is never an XSS result.
 
+pub mod assessment;
+pub mod confidence;
 pub mod context;
+pub mod exploitability;
+pub mod parser;
 pub mod strategy;
 pub mod technology;
 
+pub use exploitability::{
+    ExploitabilityMachine, ExploitabilityStage, ObservationKind, StageError, StageTransition,
+    XssObservation,
+};
+pub use assessment::{AssessmentBuilder, AssessmentError, AssessmentReflection, XssAssessment};
+pub use confidence::{calibrate, confirm_on_execution, ConfidenceAssessment, ConfidenceLevel, EvidenceScore};
+pub use parser::{parse_at, HtmlNodeType, HtmlParseContext, JavaScriptNodeType, JavaScriptParseContext};
 pub use context::{
-    analyze_context, ExploitabilityStage, ContextType, Reflection, ReflectionEncoding, XssContext,
+    analyze_context, ContextType, Reflection, ReflectionEncoding, XssContext,
 };
 pub use strategy::{build_strategy, RenderingModel, StrategyItem, XssStrategy};
 pub use technology::{
