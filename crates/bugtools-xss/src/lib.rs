@@ -25,6 +25,7 @@ pub mod source;
 pub mod taint;
 pub mod strategy;
 pub mod technology;
+pub mod verification;
 
 pub use exploitability::{
     ExploitabilityMachine, ExploitabilityStage, ObservationKind, StageError, StageTransition,
@@ -44,6 +45,10 @@ pub use parser::{
 pub use strategy::{build_strategy, RenderingModel, StrategyItem, XssStrategy};
 pub use technology::{
     detect, observations_from_response, TechnologyEvidence, TechnologyFinding, TechCategory,
+};
+pub use verification::{
+    BrowserVerifier, BrowserEnvironment, ExecutionEvidence, ExecutionEvidenceKind, ExecutionMarker,
+    MitigationPolicy, NoVerifier, VerificationRequest, VerificationResult, VerificationSafety,
 };
 
 #[cfg(test)]
