@@ -66,6 +66,35 @@ enum Commands {
         #[command(subcommand)]
         command: SqlCommands,
     },
+    /// Generate and inspect adaptive payload candidates without sending them.
+    Payload {
+        /// SQL clause/context: where, having, order_by, group_by, join, like,
+        /// limit, insert, update, delete, select_expr, function_arg, generic.
+        #[arg(long, default_value = "where")]
+        clause: String,
+        /// Quote mode: none, single, double, backtick, bracket.
+        #[arg(long, default_value = "single")]
+        quote: String,
+        /// DBMS hypothesis: mysql, mariadb, postgresql, mssql, oracle,
+        /// sqlite, db2, h2. Omit for unknown.
+        #[arg(long)]
+        dbms: Option<String>,
+        /// Representation context: query, form, json, header, cookie, path.
+        #[arg(long, default_value = "query")]
+        representation: String,
+        /// Escalation tier: recon, confirm, explore.
+        #[arg(long, default_value = "recon")]
+        tier: String,
+        /// Technique: boolean, error, timing, union, clause.
+        #[arg(long, default_value = "boolean")]
+        technique: String,
+        /// Simulate prior edge interference (widens representation breadth).
+        #[arg(long)]
+        waf: bool,
+        /// Emit JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Assess SQLi candidates from an endpoints/parameters JSON file.
     Sqli {
         /// JSON file describing candidates: a list of objects with url,
@@ -75,6 +104,20 @@ enum Commands {
         /// Authorize the hosts in the input file for probing.
         #[arg(long)]
         i_authorize: bool,
+        /// Cookies to send, as `name=value` pairs (repeatable) or a single
+        /// `name=value; name2=value2` string.
+        #[arg(long = "cookie", value_delimiter = ';')]
+        cookies: Vec<String>,
+        /// Load cookies from a file containing a `Cookie:` header value or
+        /// one `name=value` per line.
+        #[arg(long)]
+        cookie_file: Option<String>,
+        /// Extra headers as `Name: value` (repeatable).
+        #[arg(long = "header")]
+        headers: Vec<String>,
+        /// Bearer token, sent as `Authorization: Bearer <token>`.
+        #[arg(long)]
+        bearer: Option<String>,
         /// Maximum concurrent probes.
         #[arg(long, default_value_t = 4)]
         concurrency: usize,
@@ -90,6 +133,12 @@ enum Commands {
         /// Output format for stdout: text or json.
         #[arg(long, default_value = "text")]
         format: String,
+        /// Test depth: recon, confirm, or explore.
+        #[arg(long, default_value = "recon")]
+        depth: String,
+        /// Maximum requests to spend across the whole run.
+        #[arg(long, default_value_t = 500)]
+        max_requests: u64,
     },
 }
 
@@ -294,20 +343,115 @@ async fn main() -> Result<()> {
             run_sql_command(command).await?;
         }
 
+        Commands::Payload {
+            clause,
+            quote,
+            dbms,
+            representation,
+            tier,
+            technique,
+            waf,
+            json,
+        } => {
+            run_payload_command(
+                &clause, &quote, dbms.as_deref(), &representation, &tier, &technique, waf, json,
+            )?;
+        }
+
         Commands::Sqli {
             input,
             i_authorize,
+            cookies,
+            cookie_file,
+            headers,
+            bearer,
             concurrency: _,
             rate_limit: _,
             timeout: _,
             output,
             format,
+            depth,
+            max_requests,
         } => {
-            run_sqli_command(&input, i_authorize, output.as_deref(), &format).await?;
+            run_sqli_command(
+                &input,
+                i_authorize,
+                &cookies,
+                cookie_file.as_deref(),
+                &headers,
+                bearer.as_deref(),
+                output.as_deref(),
+                &format,
+                &depth,
+                max_requests,
+            )
+            .await?;
         }
     }
 
     Ok(())
+}
+
+/// Resolve the cookie set from CLI flags and an optional file.
+///
+/// Accepts `--cookie "name=value"` (repeatable), `--cookie "a=1; b=2"`,
+/// and `--cookie-file` containing either a raw `Cookie:` header value or
+/// one `name=value` per line. Returns name/value pairs.
+fn resolve_cookies(cli_cookies: &[String], cookie_file: Option<&str>) -> Result<Vec<(String, String)>> {
+    let mut jar = bugtools_sql::request::CookieJar::new("cli");
+
+    for entry in cli_cookies {
+        for pair in entry.split(';') {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                continue;
+            }
+            if let Some((name, value)) = pair.split_once('=') {
+                jar.import_pairs(&[(name.trim().to_string(), value.trim().to_string())]);
+            } else {
+                anyhow::bail!("invalid cookie '{pair}': expected name=value");
+            }
+        }
+    }
+
+    if let Some(path) = cookie_file {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("cannot read cookie file {path}: {e}"))?;
+        for line in raw.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // Strip a leading "Cookie:" if the researcher pasted a header.
+            let line = line.strip_prefix("Cookie:").unwrap_or(line).trim();
+            for pair in line.split(';') {
+                let pair = pair.trim();
+                if pair.is_empty() {
+                    continue;
+                }
+                if let Some((name, value)) = pair.split_once('=') {
+                    jar.import_pairs(&[(name.trim().to_string(), value.trim().to_string())]);
+                }
+            }
+        }
+    }
+
+    Ok(jar.export_pairs())
+}
+
+/// Parse `Name: value` header flags into a map.
+fn resolve_headers(headers: &[String], bearer: Option<&str>) -> Result<std::collections::HashMap<String, String>> {
+    let mut map = std::collections::HashMap::new();
+    for header in headers {
+        let (name, value) = header
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("invalid header '{header}': expected 'Name: value'"))?;
+        map.insert(name.trim().to_string(), value.trim().to_string());
+    }
+    if let Some(token) = bearer {
+        map.insert("Authorization".to_string(), format!("Bearer {token}"));
+    }
+    Ok(map)
 }
 
 /// A SQLi candidate as read from the input JSON.
@@ -330,11 +474,18 @@ fn default_location() -> String {
 }
 
 /// Run the `sqli` command: assess each candidate and emit assessments.
+#[allow(clippy::too_many_arguments)]
 async fn run_sqli_command(
     input_path: &str,
     authorize: bool,
+    cli_cookies: &[String],
+    cookie_file: Option<&str>,
+    header_flags: &[String],
+    bearer: Option<&str>,
     output_path: Option<&str>,
     format: &str,
+    depth: &str,
+    max_requests: u64,
 ) -> Result<()> {
     if !authorize {
         anyhow::bail!(
@@ -342,6 +493,25 @@ async fn run_sqli_command(
              This flag is your explicit confirmation that you are authorized to test every target in the input file."
         );
     }
+
+    let cookie_pairs = resolve_cookies(cli_cookies, cookie_file)?;
+    let header_map = resolve_headers(header_flags, bearer)?;
+    if !cookie_pairs.is_empty() {
+        println!(
+            "[*] session: {} cookie(s) — {}",
+            cookie_pairs.len(),
+            cookie_pairs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
+    if !header_map.is_empty() {
+        println!(
+            "[*] session: {} header(s) — {}",
+            header_map.len(),
+            header_map.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    let budget = bugtools_sql::scheduler::RequestBudget::new(max_requests);
+    println!("[*] request budget: {max_requests}");
 
     let raw = std::fs::read_to_string(input_path)
         .map_err(|e| anyhow::anyhow!("cannot read {input_path}: {e}"))?;
@@ -389,9 +559,21 @@ async fn run_sqli_command(
             .unwrap_or_default();
 
         println!(
-            "[*] {} {} param={} ({})",
-            candidate.method, candidate.url, candidate.parameter, candidate.location
+            "[*] {} {} param={} ({}) depth={}",
+            candidate.method, candidate.url, candidate.parameter, candidate.location, depth
         );
+
+        // Build the request with the researcher's session material so the
+        // scan runs authenticated exactly as they configured it.
+        let mut headers = header_map.clone();
+        if !cookie_pairs.is_empty() {
+            let cookie_header = cookie_pairs
+                .iter()
+                .map(|(n, v)| format!("{n}={v}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            headers.insert("Cookie".to_string(), cookie_header);
+        }
 
         let engine = bugtools_sql::DbmsProbeEngine::new(scope.clone());
         let base = bugtools_core::http::HttpRequest {
@@ -399,7 +581,7 @@ async fn run_sqli_command(
             job_id: None,
             url: candidate.url.clone(),
             method: candidate.method.clone(),
-            headers: Default::default(),
+            headers,
             body: None,
             timestamp: chrono::Utc::now(),
         };
@@ -650,6 +832,117 @@ async fn run_sql_command(command: SqlCommands) -> Result<()> {
                     }
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// Generate payload candidates for inspection (sends nothing).
+#[allow(clippy::too_many_arguments)]
+fn run_payload_command(
+    clause: &str,
+    quote: &str,
+    dbms: Option<&str>,
+    representation: &str,
+    tier: &str,
+    technique: &str,
+    waf: bool,
+    json: bool,
+) -> Result<()> {
+    use bugtools_sql::payload::{
+        compose_for, ClauseStrategy, ComposeContext, EscalationTier, QuoteMode,
+        RepresentationContext,
+    };
+
+    let clause_strategy = match clause.to_lowercase().as_str() {
+        "where" => ClauseStrategy::Where,
+        "having" => ClauseStrategy::Having,
+        "order_by" | "orderby" => ClauseStrategy::OrderBy,
+        "group_by" | "groupby" => ClauseStrategy::GroupBy,
+        "join" => ClauseStrategy::Join,
+        "like" => ClauseStrategy::Like,
+        "limit" | "offset" | "limit_offset" => ClauseStrategy::LimitOffset,
+        "insert" | "values" => ClauseStrategy::InsertValues,
+        "update" => ClauseStrategy::UpdateSet,
+        "delete" => ClauseStrategy::DeleteWhere,
+        "select_expr" | "select" => ClauseStrategy::SelectExpression,
+        "function_arg" | "function" => ClauseStrategy::FunctionArgument,
+        "generic" => ClauseStrategy::Generic,
+        other => anyhow::bail!("unknown clause '{other}'"),
+    };
+
+    let quote_mode = match quote.to_lowercase().as_str() {
+        "none" | "numeric" => QuoteMode::None,
+        "single" => QuoteMode::Single,
+        "double" => QuoteMode::Double,
+        "backtick" => QuoteMode::Backtick,
+        "bracket" => QuoteMode::Bracket,
+        other => anyhow::bail!("unknown quote mode '{other}'"),
+    };
+
+    let rep = match representation.to_lowercase().as_str() {
+        "query" => RepresentationContext::QueryValue,
+        "form" => RepresentationContext::FormValue,
+        "json" => RepresentationContext::JsonString,
+        "header" => RepresentationContext::HeaderValue,
+        "cookie" => RepresentationContext::CookieValue,
+        "path" => RepresentationContext::PathSegment,
+        other => anyhow::bail!("unknown representation '{other}'"),
+    };
+
+    let tier = match tier.to_lowercase().as_str() {
+        "recon" => EscalationTier::Recon,
+        "confirm" => EscalationTier::Confirm,
+        "explore" => EscalationTier::Explore,
+        other => anyhow::bail!("unknown tier '{other}'"),
+    };
+
+    let technique = match technique.to_lowercase().as_str() {
+        "boolean" => bugtools_sql::types::ProbeType::BooleanBlind,
+        "error" => bugtools_sql::types::ProbeType::ErrorInjection,
+        "timing" => bugtools_sql::types::ProbeType::TimingProbe,
+        "union" => bugtools_sql::types::ProbeType::UnionBased,
+        "clause" => bugtools_sql::types::ProbeType::ClauseVariant,
+        other => anyhow::bail!("unknown technique '{other}'"),
+    };
+
+    let dbms_family = dbms.and_then(parse_dbms_arg);
+
+    let ctx = ComposeContext {
+        clause: clause_strategy,
+        quote_mode,
+        dbms: dbms_family,
+        representation: rep,
+        original_value: "1".to_string(),
+        waf_interference: waf,
+    };
+
+    let candidates = compose_for(technique, &ctx, tier, 5);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&candidates)?);
+        return Ok(());
+    }
+
+    println!(
+        "[*] composed {} candidate(s) for {:?} / {} / {} / tier {}\n",
+        candidates.len(),
+        technique,
+        clause_strategy.label(),
+        match quote_mode {
+            QuoteMode::None => "numeric",
+            QuoteMode::Single => "single-quoted",
+            QuoteMode::Double => "double-quoted",
+            QuoteMode::Backtick => "backtick",
+            QuoteMode::Bracket => "bracket",
+        },
+        tier.label()
+    );
+    for (i, c) in candidates.iter().enumerate() {
+        println!("{:3}. {}", i + 1, c.rendered);
+        println!("     rationale: {}", c.rationale);
+        if !c.trace.steps.is_empty() {
+            println!("     transform: {}", c.trace.summary());
         }
     }
     Ok(())

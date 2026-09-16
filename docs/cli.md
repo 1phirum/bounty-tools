@@ -94,6 +94,52 @@ bugtools sql analyze "https://target/item?id=1" --param id --i-authorize
 authorized to test the target. Only the host in the URL is added to scope;
 every other host stays blocked by default deny.
 
+### `bugtools payload` — inspect adaptive generation (sends nothing)
+
+Generate and print the candidates the engine would use, with the rationale
+for each. This is the transparency surface: you can see *why* a payload was
+composed.
+
+```sh
+bugtools payload --clause order_by --quote numeric --dbms postgresql --tier explore --technique boolean
+bugtools payload --clause where --quote single --tier recon
+bugtools payload --clause where --quote single --waf --technique error --json
+```
+
+Flags: `--clause` (where/having/order_by/group_by/join/like/limit/insert/
+update/delete/select_expr/function_arg/generic), `--quote` (none/single/
+double/backtick/bracket), `--dbms`, `--representation` (query/form/json/
+header/cookie/path), `--tier` (recon/confirm/explore), `--technique`
+(boolean/error/timing/union/clause), `--waf`, `--json`.
+
+Note that generation is clause-aware: for `--clause order_by` the engine
+emits `,(SELECT 1)` rather than `AND 1=1`, because ORDER BY cannot take a
+boolean predicate.
+
+## Cookies, headers and authentication
+
+`bugtools sqli` and `bugtools sql analyze` accept session material so you can
+test authenticated surfaces exactly as you are logged in:
+
+```sh
+# inline cookies (repeatable, or one string with ; separators)
+bugtools sqli --input endpoints.json --i-authorize \
+  --cookie "session=abc123" --cookie "tenant_id=42"
+
+# or from a file (a raw Cookie: header value, or name=value per line)
+bugtools sqli --input endpoints.json --i-authorize --cookie-file session.txt
+
+# custom headers and a bearer token
+bugtools sqli --input endpoints.json --i-authorize \
+  --header "X-Account-ID: 99" --bearer "eyJhbGci..."
+
+# depth and request budget
+bugtools sqli --input endpoints.json --i-authorize --depth confirm --max-requests 200
+```
+
+Cookie values are never printed — only the cookie *names* are listed, so a
+terminal transcript is safe to share.
+
 ## Scope and safety
 
 - The pipeline authorizes only the target domain and its subdomain wildcard.
