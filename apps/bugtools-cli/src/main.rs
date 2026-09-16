@@ -91,8 +91,8 @@ enum Commands {
         /// Emit JSON.
         #[arg(short = 'j', long)]
         json: bool,
-        /// Apply a program's stated rules. Currently: smtp2go.
-        #[arg(long)]
+        /// Path to a program policy TOML file. Enforces its scope and limits.
+        #[arg(long, value_name = "FILE")]
         program: Option<String>,
         /// Your researcher handle; sent as an identity header when the
         /// program requires one.
@@ -175,8 +175,8 @@ enum Commands {
         /// Maximum requests to spend across the whole run.
         #[arg(long, default_value_t = 500)]
         max_requests: u64,
-        /// Apply a program's stated rules. Currently: smtp2go.
-        #[arg(long)]
+        /// Path to a program policy TOML file. Enforces its scope and limits.
+        #[arg(long, value_name = "FILE")]
         program: Option<String>,
         /// Your researcher handle; sent as an identity header when the
         /// program requires one, and available as X-Bug-Bounty otherwise.
@@ -608,16 +608,17 @@ async fn run_sqli_command(
     handle: Option<&str>,
 ) -> Result<()> {
     // Program policy: apply stated scope and constraints when provided.
-    let policy = program.and_then(|name| match name.to_lowercase().as_str() {
-        "smtp2go" => Some(bugtools_sql::policy::smtp2go_policy()),
-        other => {
-            eprintln!("[!] unknown program '{other}' — no policy applied");
-            None
+    let policy = program.and_then(|path| {
+        match bugtools_sql::policy::ProgramPolicy::from_file(path) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("[!] could not load policy '{path}': {e}");
+                None
+            }
         }
     });
     if let Some(p) = &policy {
-        println!("[*] program: {}", p.name);
-        println!("[*]   rate cap {}/s · max concurrency {}", p.max_rate_per_second, p.max_concurrency);
+        println!("[*] policy: {}", p.summary());
         for note in &p.notes {
             println!("[*]   note: {note}");
         }
@@ -1038,16 +1039,28 @@ async fn run_tech_command(
     }
 
     // Resolve the program policy before touching the target.
-    let policy = program.and_then(|name| match name.to_lowercase().as_str() {
-        "smtp2go" => Some(bugtools_sql::policy::smtp2go_policy()),
-        other => {
-            eprintln!("[!] unknown program '{other}' — no policy applied");
-            None
+    let policy = program.and_then(|path| {
+        match bugtools_sql::policy::ProgramPolicy::from_file(path) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("[!] could not load policy '{path}': {e}");
+                None
+            }
         }
     });
     if let Some(p) = &policy {
-        println!("[*] program: {}", p.name);
-        println!("[*]   rate cap {}/s · max concurrency {}", p.max_rate_per_second, p.max_concurrency);
+        if json {
+            eprintln!("[*] policy: {}", p.summary());
+        } else {
+            println!("[*] policy: {}", p.summary());
+        }
+        for note in &p.notes {
+            if json {
+                eprintln!("[*]   note: {note}");
+            } else {
+                println!("[*]   note: {note}");
+            }
+        }
         let host = parsed.host_str().unwrap_or("").to_string();
         if !p.allows_host(&host) {
             anyhow::bail!(

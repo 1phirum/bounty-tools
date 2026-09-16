@@ -1,0 +1,47 @@
+# BugTools program policy — copy this, edit for YOUR program, pass with
+#   --program path/to/policy.toml
+#
+# Nothing here is program-specific: any bug bounty or VDP scope can be
+# expressed with these fields. Scope and limits are enforced before any
+# request is sent.
+
+name = "My Program"
+
+# Hosts the program authorizes. Exact names or wildcards (".example.com").
+in_scope = [
+    "example.com",
+    "*.example.com",
+]
+
+# Hosts explicitly excluded. These ALWAYS win over in_scope.
+out_of_scope = [
+    "support.example.com",
+]
+
+# Keep these at or below the program's stated limits.
+max_rate_per_second = 2.0
+max_concurrency = 2
+
+# Set true ONLY if the program permits automated scanning.
+# Left false, `bugtools sqli --program ...` will refuse to run.
+scanners_allowed = true
+
+# If the program requires a researcher identity header, uncomment:
+# identity_header = ["X-Bug-Bounty", "your-handle"]
+
+# Finding classes the program will not pay for; shown so you don't file them.
+excluded_finding_kinds = [
+    "rate limiting",
+    "brute force",
+    "user enumeration",
+    "missing security headers",
+    "missing cookie flags",
+    "version disclosure",
+    "banner identification",
+    "open redirect without impact",
+]
+
+notes = [
+    "Register test accounts with your researcher alias.",
+    "One vulnerability per report.",
+]
