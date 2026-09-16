@@ -1146,6 +1146,65 @@ async fn run_tech_command(
 
     println!();
     println!("RENDERING MODEL: {:?}", strategy.rendering_model);
+
+    // Full XSS analysis: submit a benign marker as a query parameter in ONE
+    // additional request, then analyze the reflection of that marker. The
+    // marker contains no markup, so this cannot itself constitute an attack.
+    let probe = format!("btprobe{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let probe_url = {
+        let mut u = parsed.clone();
+        u.query_pairs_mut()
+            .append_pair("bugtools_probe", &probe);
+        u.to_string()
+    };
+    let probe_body = match client.get(&probe_url).send().await {
+        Ok(r) => r.text().await.unwrap_or_default(),
+        Err(e) => {
+            eprintln!("[!] probe request failed: {e}");
+            body.clone()
+        }
+    };
+    // Taint analysis runs on INLINE scripts — that is where DOM flows live.
+    let script_sources = bugtools_xss::technology::extract_inline_scripts(&probe_body);
+    let request = bugtools_xss::AnalyzeRequest {
+        url: url.to_string(),
+        parameter: "bugtools_probe".into(),
+        submitted: probe.clone(),
+        body: probe_body,
+        headers: header_vec.clone(),
+        script_sources,
+    };
+    let assessment = bugtools_xss::analyze(&request);
+
+    println!();
+    println!("XSS ANALYSIS (marker probe, {}):", assessment.exploitability_stage.label());
+    if let Some(r) = &assessment.reflection {
+        println!("  reflection: offset {} ({})", r.response_offset, r.encoding);
+        if let Some(h) = &r.html_context {
+            println!("    html context: {} in <{:?}> attr={:?}", h.node_type.label(), h.element_name, h.attribute_name);
+        }
+        if let Some(j) = &r.js_context {
+            println!("    js context: {}", j.node_type.label());
+        }
+    } else {
+        println!("  reflection: none (marker did not appear)");
+    }
+    if !assessment.remaining_uncertainty.is_empty() {
+        println!("  uncertainty:");
+        for u in &assessment.remaining_uncertainty {
+            println!("    - {u}");
+        }
+    }
+    println!("  confidence: {}", assessment.confidence.level.label());
+    for t in &assessment.transitions {
+        println!("    {} -> {}", t.from.label(), t.to.label());
+    }
+    if !assessment.limitations.is_empty() {
+        println!("  limitations:");
+        for l in &assessment.limitations {
+            println!("    - {l}");
+        }
+    }
     if strategy.is_generic() {
         println!("STRATEGY: generic (no technology-specific guidance)");
     } else {

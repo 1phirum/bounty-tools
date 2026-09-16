@@ -14,3 +14,4 @@ tracing = { workspace = true }
 regex = { workspace = true }
 uuid = { workspace = true }
 scraper = { workspace = true }
+url = { workspace = true }

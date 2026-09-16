@@ -656,3 +656,56 @@ mod tests {
         assert_eq!(lv.evidence[0].evidence_source, EvidenceSource::Cookie);
     }
 }
+
+/// Extract the text content of inline <script> blocks (no src attribute).
+/// These are what the taint engine analyzes for source->sink flows.
+pub fn extract_inline_scripts(html: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let lower = html.to_lowercase();
+    let mut idx = 0;
+    while let Some(start) = lower[idx..].find("<script") {
+        let abs = idx + start;
+        let tag_end = match lower[abs..].find('>') {
+            Some(e) => abs + e,
+            None => break,
+        };
+        let tag = &html[abs..tag_end];
+        if !tag.to_lowercase().contains("src=") {
+            let body_start = tag_end + 1;
+            let body_end = lower[body_start..]
+                .find("</script")
+                .map(|p| body_start + p)
+                .unwrap_or(html.len());
+            out.push(html[body_start..body_end].to_string());
+        }
+        idx = tag_end + 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod inline_script_tests {
+    use super::*;
+
+    #[test]
+    fn inline_scripts_extracted() {
+        let html = r#"<script>var a = 1;</script><script src="/x.js"></script><script>var b = 2;</script>"#;
+        let inline = extract_inline_scripts(html);
+        assert_eq!(inline.len(), 2);
+        assert!(inline[0].contains("var a = 1;"));
+        assert!(inline[1].contains("var b = 2;"));
+    }
+
+    #[test]
+    fn external_only_yields_nothing() {
+        let html = r#"<script src="/a.js"></script>"#;
+        assert!(extract_inline_scripts(html).is_empty());
+    }
+
+    #[test]
+    fn unterminated_script_is_bounded() {
+        let inline = extract_inline_scripts("<script>var x = 1;");
+        assert_eq!(inline.len(), 1);
+        assert!(inline[0].contains("var x"));
+    }
+}

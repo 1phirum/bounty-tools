@@ -19,6 +19,11 @@ pub mod confidence;
 pub mod context;
 pub mod exploitability;
 pub mod parser;
+pub mod engine;
+pub mod reflection;
+pub mod sink;
+pub mod source;
+pub mod taint;
 pub mod strategy;
 pub mod technology;
 
@@ -27,6 +32,11 @@ pub use exploitability::{
     XssObservation,
 };
 pub use assessment::{AssessmentBuilder, AssessmentError, AssessmentReflection, XssAssessment};
+pub use engine::{analyze, AnalyzeRequest};
+pub use reflection::{correlate, detect_reflections, DetectionConfig, ReflectionPoint};
+pub use sink::{detect_sinks, SinkRisk, SinkTarget};
+pub use source::{detect_sources, SourceKind};
+pub use taint::{build_graph, TaintFlow, TaintGraph};
 pub use confidence::{calibrate, confirm_on_execution, ConfidenceAssessment, ConfidenceLevel, EvidenceScore};
 pub use parser::{parse_at, HtmlNodeType, HtmlParseContext, JavaScriptNodeType, JavaScriptParseContext};
 pub use context::{
