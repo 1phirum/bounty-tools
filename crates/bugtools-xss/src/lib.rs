@@ -40,8 +40,9 @@ pub use source::{detect_sources, SourceKind};
 pub use taint::{build_graph, TaintFlow, TaintGraph};
 pub use confidence::{calibrate, confirm_on_execution, ConfidenceAssessment, ConfidenceLevel, EvidenceScore};
 pub use parser::{
-    parse_at, ContextMethod, HtmlNodeType, HtmlParseContext, JavaScriptNodeType,
-    JavaScriptParseContext,
+    lex_at, parse_at, parse_script, ContextMethod, HtmlNodeType, HtmlParseContext,
+    JavaScriptNodeType, JavaScriptParseContext, ScopeGraph, SourceRange, SyntaxKind, SyntaxTree,
+    Token, TokenKind,
 };
 pub use strategy::{build_strategy, RenderingModel, StrategyItem, XssStrategy};
 pub use technology::{

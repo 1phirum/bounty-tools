@@ -74,9 +74,12 @@ fn resolve_js(
     let script_body = &body[script_start..script_end];
     let inner_offset = point.offset.saturating_sub(script_start);
     let ctx = lex_at(script_body, inner_offset);
+    // Keep real resolutions — the syntax tree, and the token scan it falls
+    // back to — and drop the last-resort answer, mirroring `resolve_html`.
     match ctx.method {
-        crate::parser::javascript::ContextMethod::Lexed => Some(ctx),
-        _ => None,
+        crate::parser::javascript::ContextMethod::Ast
+        | crate::parser::javascript::ContextMethod::Lexed => Some(ctx),
+        crate::parser::javascript::ContextMethod::Fallback => None,
     }
 }
 
