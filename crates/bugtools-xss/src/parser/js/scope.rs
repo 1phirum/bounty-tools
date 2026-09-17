@@ -308,6 +308,20 @@ impl<'a> Builder<'a> {
                         init: Some(n.range),
                     },
                 );
+            } else if child_kind == SyntaxKind::Spread {
+                // `...rest`: the name is the spread's operand.
+                if let Some(&inner) = self.tree.node(child).children.first() {
+                    let n = self.tree.node(inner);
+                    self.add_binding(
+                        scope,
+                        Binding {
+                            name: param_name(self.tree, inner),
+                            kind: BindingKind::Param,
+                            range: n.range,
+                            init: Some(n.range),
+                        },
+                    );
+                }
             } else if matches!(child_kind, SyntaxKind::ObjectLit | SyntaxKind::ArrayLit) {
                 // A destructuring parameter (`function f({ id })`): bind each
                 // name the pattern introduces.
@@ -473,17 +487,13 @@ fn collect_binding_idents(tree: &SyntaxTree, node: NodeId, out: &mut Vec<NodeId>
 /// Read a parameter's name text, tolerating spreads and defaults.
 fn param_name(tree: &SyntaxTree, param: NodeId) -> String {
     let node = tree.node(param);
-    // A Param with children is `p = default` or `...p`: the name is the leaf.
+    // A Param with children is `p = default` (the name is the first child,
+    // itself a Param leaf) or `...p` (a Spread wrapping the leaf).
     if let Some(&first) = node.children.first() {
-        let child = tree.node(first);
-        if child.kind == SyntaxKind::Ident {
-            return tree.node_text(first).to_string();
-        }
-        // Spread wrapping an ident.
-        if child.kind == SyntaxKind::Spread {
-            if let Some(&inner) = child.children.first() {
-                return tree.node_text(inner).to_string();
-            }
+        match tree.node(first).kind {
+            SyntaxKind::Ident => return tree.node_text(first).to_string(),
+            SyntaxKind::Param | SyntaxKind::Spread => return param_name(tree, first),
+            _ => {}
         }
     }
     tree.node_text(param).to_string()
