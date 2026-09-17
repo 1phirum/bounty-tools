@@ -93,6 +93,44 @@ pub enum Commands {
         #[arg(long)]
         handle: Option<String>,
     },
+    /// Analyze a URL for XSS: reflection, context and DOM taint flow.
+    #[command(visible_alias = "w", long_about = "XSS analysis. Submits one benign marker per parameter (in the query, or the form body for a POST), resolves where the response reflects it, and traces the page's inline scripts for a source-to-sink taint flow. The marker carries no markup: this observes, it does not attack.\n\nWith no --param, every parameter already in the request is probed in turn.\n\nEXAMPLES:\n  bugtools w https://target/search?q=1 --i-authorize\n  bugtools xss https://target/item?id=1 -p id --i-authorize\n  bugtools w https://target/comment -X POST -d \"body=hi\" --i-authorize\n  bugtools w https://target/p?a=1 -p a -c session.txt -H \"X-Account-ID: 9\" --i-authorize --json")]
+    Xss {
+        /// URL to analyze. Query parameters are probed unless --param selects.
+        url: String,
+        /// Authorize this host for the request.
+        #[arg(short = 'y', long)]
+        i_authorize: bool,
+        /// Parameter(s) to probe. Repeatable; defaults to every parameter the
+        /// request already carries.
+        #[arg(short = 'p', long = "param")]
+        param: Vec<String>,
+        /// Request method: GET or POST.
+        #[arg(short = 'X', long, default_value = "GET")]
+        method: String,
+        /// Form body for a POST, as `a=1&b=2`.
+        #[arg(short = 'd', long = "data")]
+        data: Option<String>,
+        /// Cookies (inline list or file path).
+        #[arg(short = 'c', long = "cookie", value_delimiter = ';')]
+        cookies: Vec<String>,
+        /// Extra headers as `Name: value`.
+        #[arg(short = 'H', long = "header")]
+        headers: Vec<String>,
+        /// Bearer token.
+        #[arg(short = 'b', long)]
+        bearer: Option<String>,
+        /// Emit JSON.
+        #[arg(short = 'j', long)]
+        json: bool,
+        /// Path to a program policy TOML file. Enforces its scope and limits.
+        #[arg(long, value_name = "FILE")]
+        program: Option<String>,
+        /// Your researcher handle; sent as an identity header when the
+        /// program requires one.
+        #[arg(long)]
+        handle: Option<String>,
+    },
     /// Inspect adaptive payload generation (sends nothing).
     #[command(visible_alias = "gen", long_about = "Show the candidates the SQLi engine would use, with the rationale for each. Sends no traffic.\n\nEXAMPLES:\n  bugtools gen --clause where --quote single\n  bugtools payload --clause order_by --quote numeric --dbms postgresql --tier explore\n  bugtools gen --clause where --quote single --waf --json")]
     Payload {

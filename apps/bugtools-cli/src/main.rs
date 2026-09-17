@@ -65,6 +65,33 @@ async fn main() -> Result<()> {
             .await
         }
 
+        Commands::Xss {
+            url,
+            i_authorize,
+            param,
+            method,
+            data,
+            cookies,
+            headers,
+            bearer,
+            json,
+            program,
+            handle,
+        } => {
+            let opts = commands::xss::XssOptions {
+                params: &param,
+                method: &method,
+                data: data.as_deref(),
+                cookies: &cookies,
+                headers: &headers,
+                bearer: bearer.as_deref(),
+                json,
+                program: program.as_deref(),
+                handle: handle.as_deref(),
+            };
+            commands::xss::run(&url, i_authorize, opts).await
+        }
+
         Commands::Payload {
             clause,
             quote,
