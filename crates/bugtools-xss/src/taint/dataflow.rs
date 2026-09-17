@@ -45,6 +45,7 @@ use std::collections::{HashMap, HashSet};
 use crate::parser::js::ast::SyntaxKind;
 use crate::parser::js::scope::binding_idents;
 use crate::parser::js::{parse_script, NodeId, ScopeGraph, SyntaxTree};
+use crate::sanitize::{classify_sanitizer, SanitizerKind};
 use crate::sink::detector::{detect_sinks, SinkCall};
 use crate::source::detector::{detect_sources, SourceRead};
 use crate::taint::graph::{TaintEdge, TaintFlow, TaintGraph, TaintNode, TaintNodeKind};
@@ -64,12 +65,12 @@ pub fn build(script: &str) -> TaintGraph {
 }
 
 /// A signature of a taint state: enough to decide that two states behave
-/// identically in the analysis (the origin that taints them, whether a
-/// sanitizer was seen, and the transforms recorded).
-type TaintSig = Option<(usize, bool, Vec<String>)>;
+/// identically in the analysis (the origin that taints them, the sanitizers
+/// seen, and the transforms recorded).
+type TaintSig = Option<(usize, Vec<SanitizerKind>, Vec<String>)>;
 
 fn taint_sig(st: &Option<TaintState>) -> TaintSig {
-    st.as_ref().map(|s| (s.origin.offset, s.sanitized, s.transforms.clone()))
+    st.as_ref().map(|s| (s.origin.offset, s.sanitizers.clone(), s.transforms.clone()))
 }
 
 /// A signature of a value: its taint signature plus the objects it may
@@ -96,28 +97,36 @@ const INTERPROCEDURAL_BUDGET: usize = 4_096;
 /// stops being traced. Real inline scripts do not approach this depth.
 const MAX_CALL_DEPTH: usize = 64;
 
-/// The provenance of a tainted value: where it entered and what happened to
-/// it on the way.
+/// The provenance of a tainted value: where it entered, what happened to it on
+/// the way, and which sanitizers were applied.
 #[derive(Debug, Clone)]
 struct TaintState {
     origin: SourceRead,
     transforms: Vec<String>,
-    sanitized: bool,
+    /// The sanitizers seen on the path, in order. Whether any of them
+    /// sanitizes the flow depends on the sink it reaches, so the decision is
+    /// made at the sink, not here.
+    sanitizers: Vec<SanitizerKind>,
 }
 
 impl TaintState {
     fn from_source(src: &SourceRead) -> Self {
-        Self { origin: src.clone(), transforms: Vec::new(), sanitized: false }
+        Self { origin: src.clone(), transforms: Vec::new(), sanitizers: Vec::new() }
     }
 }
 
-/// Merge several states into one, keeping the first (source-order) origin
-/// and every transformation seen on any branch.
+/// Merge several states into one, keeping the first (source-order) origin,
+/// every transformation, and every sanitizer seen on any branch.
 fn combine_taint(states: Vec<Option<TaintState>>) -> Option<TaintState> {
     let mut iter = states.into_iter().flatten();
     let mut out = iter.next()?;
     for st in iter {
         out.transforms.extend(st.transforms);
+        for k in st.sanitizers {
+            if !out.sanitizers.contains(&k) {
+                out.sanitizers.push(k);
+            }
+        }
     }
     Some(out)
 }
@@ -184,24 +193,12 @@ fn combine(states: Vec<Option<Value>>) -> Option<Value> {
 /// How a call affects a tainted value flowing through it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CallClass {
-    /// Makes the value safe for the sink it reaches.
-    Sanitizer,
+    /// Makes the value safe for the sinks its kind protects.
+    Sanitizer(SanitizerKind),
     /// Changes the value without sanitizing. Carries the canonical
     /// operation name recorded on the flow.
     Transform(String),
 }
-
-/// Sanitizer call names. A call whose callee matches makes the result safe.
-const SANITIZERS: &[&str] = &[
-    "textContent",
-    "createTextNode",
-    "encodeURIComponent",
-    "DOMPurify.sanitize",
-    "sanitize",
-    "escapeHtml",
-    "sanitizeHtml",
-    "innerText",
-];
 
 /// Transform call names. Recorded on the flow, but the value stays tainted.
 const TRANSFORMS: &[&str] = &[
@@ -222,19 +219,20 @@ const TRANSFORMS: &[&str] = &[
 /// Classify a call by its callee name, accepting either the full dotted
 /// name (`JSON.parse`, `DOMPurify.sanitize`) or the final segment
 /// (`.split(`, `escapeHtml(`). The name recorded on a transform is the
-/// canonical operation â€” the dotted name when that is the match
-/// (`JSON.parse`), otherwise the final segment (`slice`).
+/// canonical operation Ã¢ the dotted name when that is the match
+/// (`JSON.parse`), otherwise the final segment (`slice`). A sanitizer is
+/// classified by what it protects (see [`crate::sanitize`]), not by the name
+/// alone.
 fn classify_call(name: &str) -> Option<CallClass> {
     let last = name.rsplit('.').next().unwrap_or(name);
-    if SANITIZERS.contains(&name) || SANITIZERS.contains(&last) {
-        Some(CallClass::Sanitizer)
+    if let Some(kind) = classify_sanitizer(name) {
+        return Some(CallClass::Sanitizer(kind));
     } else if TRANSFORMS.contains(&name) {
-        Some(CallClass::Transform(name.to_string()))
+        return Some(CallClass::Transform(name.to_string()));
     } else if TRANSFORMS.contains(&last) {
-        Some(CallClass::Transform(last.to_string()))
-    } else {
-        None
+        return Some(CallClass::Transform(last.to_string()));
     }
+    None
 }
 
 struct Analyzer<'a> {
@@ -525,8 +523,8 @@ impl<'a> Analyzer<'a> {
                 let mut combined = match self.analyze_call(callee, &states) {
                     // The callee was traced: its value is what the body
                     // returns. A return derived from an argument supersedes
-                    // that argument â€” it is the same data, carrying the
-                    // transforms and sanitizers the body applied to it â€” so
+                    // that argument Ã¢ it is the same data, carrying the
+                    // transforms and sanitizers the body applied to it Ã¢ so
                     // the argument drops out of the combination. A return
                     // from elsewhere, and every argument it does not derive
                     // from, is independent data and is kept.
@@ -546,7 +544,7 @@ impl<'a> Analyzer<'a> {
                     // Traced and clean, or understood but not traced
                     // (recursion, the depth cap, the budget): the arguments
                     // stay as the value's provenance. A sink inside the
-                    // callee's range is not consulted here â€” the body's own
+                    // callee's range is not consulted here Ã¢ the body's own
                     // analysis records those it reaches.
                     CallTrace::Modelled(None) => combine(states),
                     // Not a call this analysis models: the callee joins its
@@ -564,20 +562,28 @@ impl<'a> Analyzer<'a> {
                         combined
                     }
                 };
-                if let Some(ref mut v) = combined {
-                    let name = self.callee_name(callee);
-                    match classify_call(&name) {
-                        Some(CallClass::Sanitizer) => {
-                            if let Some(ref mut t) = v.taint {
-                                t.sanitized = true;
+                // A sanitizer or transform is classified from the call only
+                // when the callee is not a function this script declares: a
+                // user-defined `escapeHtml` is traced like any other
+                // function, and its body decides what the value carries.
+                // Trusting the name is the exact error the semantic model
+                // exists to remove.
+                if self.resolve_callee(callee).is_none() {
+                    if let Some(ref mut v) = combined {
+                        let name = self.callee_name(callee);
+                        match classify_call(&name) {
+                            Some(CallClass::Sanitizer(kind)) => {
+                                if let Some(ref mut t) = v.taint {
+                                    t.sanitizers.push(kind);
+                                }
                             }
-                        }
-                        Some(CallClass::Transform(op)) => {
-                            if let Some(ref mut t) = v.taint {
-                                t.transforms.push(op);
+                            Some(CallClass::Transform(op)) => {
+                                if let Some(ref mut t) = v.taint {
+                                    t.transforms.push(op);
+                                }
                             }
+                            None => {}
                         }
-                        None => {}
                     }
                 }
                 combined
@@ -923,10 +929,14 @@ impl<'a> Analyzer<'a> {
         let Some(st) = &value.taint else {
             return;
         };
+        // Whether the flow is sanitized depends on the sink: a sanitizer
+        // protects only the contexts its escaping covers, so the same path is
+        // sanitized for one sink and not for another.
+        let sanitized = st.sanitizers.iter().any(|k| k.protects(sink.target));
         // The same source-to-sink pair may be observed by more than one walk
         // (a function is descended into at the top level and again at its
         // call site). It is one flow, recorded once.
-        let identity = (st.origin.offset, sink.offset, st.sanitized, st.transforms.clone());
+        let identity = (st.origin.offset, sink.offset, sanitized, st.transforms.clone());
         if !self.seen_flows.insert(identity) {
             return;
         }
@@ -944,7 +954,7 @@ impl<'a> Analyzer<'a> {
                 offset: sink.offset,
             },
             transforms: st.transforms.clone(),
-            sanitized: st.sanitized,
+            sanitized,
             sink_risk: sink.risk.label().to_string(),
         });
     }
@@ -1117,6 +1127,65 @@ mod tests {
         let f = flows("var v = location.hash;\nif (false) { escapeHtml(other); }\nel.innerHTML = v;");
         assert_eq!(f.len(), 1);
         assert!(!f[0].sanitized, "an off-path sanitizer must not sanitize");
+    }
+
+    // -----------------------------------------------------------------
+    // Sanitizer semantics: protection is per-sink-context (P1.5)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn escape_html_protects_markup_but_not_script_or_url_sinks() {
+        // `escapeHtml` removes markup characters but leaves quotes and
+        // parentheses, so a JS-string sink and a URL sink stay live.
+        let f = flows("var v = escapeHtml(location.hash);\nsetTimeout(v, 1);");
+        assert_eq!(f.len(), 1);
+        assert!(!f[0].sanitized, "escaping markup does not make a value safe for eval");
+        let g = flows("var v = escapeHtml(location.hash);\nframe.src = v;");
+        assert_eq!(g.len(), 1);
+        assert!(!g[0].sanitized, "escaping markup does not make a value safe for a URL");
+    }
+
+    #[test]
+    fn encode_uri_component_protects_every_sink() {
+        for (src, sink) in [
+            ("el.innerHTML = encodeURIComponent(location.hash);", "innerHTML"),
+            ("setTimeout(encodeURIComponent(location.hash), 1);", "setTimeout"),
+            ("frame.src = encodeURIComponent(location.hash);", ".src"),
+        ] {
+            let f = flows(src);
+            assert_eq!(f.len(), 1, "{src}");
+            assert!(f[0].sanitized, "encodeURIComponent must sanitize the {sink} sink");
+        }
+    }
+
+    #[test]
+    fn encode_uri_protects_markup_and_url_but_not_script() {
+        // `encodeURI` leaves reserved URI characters raw, so a JS string can
+        // still be broken out of.
+        let html = flows("el.innerHTML = encodeURI(location.hash);");
+        assert!(html[0].sanitized, "encodeURI must sanitize a markup sink");
+        let url = flows("frame.src = encodeURI(location.hash);");
+        assert!(url[0].sanitized, "encodeURI must sanitize a URL sink");
+        let js = flows("setTimeout(encodeURI(location.hash), 1);");
+        assert!(!js[0].sanitized, "encodeURI must not sanitize a script sink");
+    }
+
+    #[test]
+    fn dompurify_protects_markup_but_not_script_or_url() {
+        let html = flows("el.innerHTML = DOMPurify.sanitize(location.hash);");
+        assert!(html[0].sanitized, "DOMPurify must sanitize a markup sink");
+        let js = flows("setTimeout(DOMPurify.sanitize(location.hash), 1);");
+        assert!(!js[0].sanitized, "sanitized markup text may still be a script");
+        let url = flows("frame.src = DOMPurify.sanitize(location.hash);");
+        assert!(!url[0].sanitized, "sanitized markup text may still be a scheme");
+    }
+
+    #[test]
+    fn text_content_assignment_is_not_a_sink() {
+        // `textContent` never interprets markup: it is a safe sink, so no flow
+        // is recorded at all. It is also not a sanitizer of the value.
+        let f = flows("el.textContent = location.hash;");
+        assert!(f.is_empty(), "textContent must not be a sink: {:?}", f);
     }
 
     #[test]
@@ -1379,11 +1448,25 @@ mod tests {
     }
 
     #[test]
-    fn sanitizer_name_still_applies_to_interprocedural_call() {
-        // The name-based classification composes with the traced body.
+    fn library_sanitizer_name_applies_to_opaque_call() {
+        // No function in the script declares `escapeHtml`, so the callee is a
+        // library call: the name classification applies and the flow is
+        // sanitized for a markup sink.
+        let f = flows("el.innerHTML = escapeHtml(location.hash);");
+        assert_eq!(f.len(), 1);
+        assert!(f[0].sanitized, "a library escapeHtml must sanitize a markup sink");
+    }
+
+    #[test]
+    fn user_defined_sanitizer_name_is_not_trusted() {
+        // The same name declared as this script's own function is traced like
+        // any other function: its body decides. A body that returns its
+        // argument unchanged escapes nothing, so trusting the name would mark
+        // a live flow sanitized. This is the failure mode the semantic model
+        // exists to remove.
         let f = flows("function escapeHtml(x) { return x; }\nel.innerHTML = escapeHtml(location.hash);");
         assert_eq!(f.len(), 1);
-        assert!(f[0].sanitized);
+        assert!(!f[0].sanitized, "a user-defined name must not sanitize by name");
     }
 
     #[test]

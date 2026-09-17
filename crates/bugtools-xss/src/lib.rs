@@ -21,6 +21,7 @@ pub mod finding;
 pub mod parser;
 pub mod engine;
 pub mod reflection;
+pub mod sanitize;
 pub mod sink;
 pub mod source;
 pub mod taint;
