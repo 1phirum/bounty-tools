@@ -308,6 +308,21 @@ impl<'a> Builder<'a> {
                         init: Some(n.range),
                     },
                 );
+            } else if matches!(child_kind, SyntaxKind::ObjectLit | SyntaxKind::ArrayLit) {
+                // A destructuring parameter (`function f({ id })`): bind each
+                // name the pattern introduces.
+                for ident in binding_idents(self.tree, child) {
+                    let n = self.tree.node(ident);
+                    self.add_binding(
+                        scope,
+                        Binding {
+                            name: self.tree.node_text(ident).to_string(),
+                            kind: BindingKind::Param,
+                            range: n.range,
+                            init: Some(n.range),
+                        },
+                    );
+                }
             } else {
                 self.visit(child);
             }
@@ -320,37 +335,32 @@ impl<'a> Builder<'a> {
         for &declarator in &children {
             let d = self.tree.node(declarator);
             let d_children = &d.children;
-            // Destructuring or a non-name declarator: record the pattern as
-            // one binding when we can read a name, else skip.
-            let Some(name_node) = d_children.first() else {
+            let Some(target_node) = d_children.first().copied() else {
                 continue;
             };
-            if self.tree.node(*name_node).kind != SyntaxKind::Ident {
-                continue;
-            }
-            let name = self.tree.node(*name_node);
             let kind = match self.declared_kind(id) {
                 Some(k) => k,
                 None => BindingKind::Var,
             };
-            let init = d_children.get(1).map(|_| {
-                // The initializer expression's start approximates the `=`.
-                self.tree.node(d_children[1]).range
-            });
+            let init = d_children.get(1).map(|&i| self.tree.node(i).range);
             let target = if kind.is_hoisted() {
                 self.hoist_target()
             } else {
                 self.current()
             };
-            self.add_binding(
-                target,
-                Binding {
-                    name: self.tree.node_text(*name_node).to_string(),
-                    kind,
-                    range: name.range,
-                    init,
-                },
-            );
+            // A simple name, or a destructuring pattern introducing several
+            // names (`const { a, b } = obj` / `const [x] = arr`).
+            for ident in binding_idents(self.tree, target_node) {
+                self.add_binding(
+                    target,
+                    Binding {
+                        name: self.tree.node_text(ident).to_string(),
+                        kind,
+                        range: self.tree.node(ident).range,
+                        init,
+                    },
+                );
+            }
             // Continue into the initializer (it may contain nested functions).
             for &c in d_children.iter().skip(1) {
                 self.visit(c);
@@ -423,6 +433,43 @@ impl<'a> Builder<'a> {
     }
 }
 
+/// The identifier nodes a binding target introduces.
+///
+/// For a simple name this is the identifier itself. For a destructuring
+/// pattern (`{ a, b: c }` / `[x, ...rest]`) it is every name the pattern
+/// binds — object shorthand binds the key, a `key: value` pair binds the
+/// value, and nested patterns are walked. Used by both the scope builder
+/// and the data-flow layer so the two agree on what a pattern declares.
+pub(crate) fn binding_idents(tree: &SyntaxTree, target: NodeId) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    collect_binding_idents(tree, target, &mut out);
+    out
+}
+
+fn collect_binding_idents(tree: &SyntaxTree, node: NodeId, out: &mut Vec<NodeId>) {
+    match tree.node(node).kind {
+        SyntaxKind::Ident => out.push(node),
+        SyntaxKind::ObjectLit | SyntaxKind::ArrayLit | SyntaxKind::Spread => {
+            for child in tree.node(node).children.clone() {
+                collect_binding_idents(tree, child, out);
+            }
+        }
+        SyntaxKind::Property => {
+            let children = tree.node(node).children.clone();
+            match children.as_slice() {
+                // Shorthand `{ a }`: the key is the binding.
+                [only] => collect_binding_idents(tree, *only, out),
+                // `{ key: value }`: the value is the binding.
+                [_, value, ..] => collect_binding_idents(tree, *value, out),
+                _ => {}
+            }
+        }
+        // A default value (`{ a = 1 }`) or anything else: no name to bind
+        // that we can read confidently.
+        _ => {}
+    }
+}
+
 /// Read a parameter's name text, tolerating spreads and defaults.
 fn param_name(tree: &SyntaxTree, param: NodeId) -> String {
     let node = tree.node(param);
@@ -449,11 +496,6 @@ mod tests {
 
     fn graph(src: &str) -> ScopeGraph {
         ScopeGraph::build(&parse_script(src))
-    }
-
-    fn binding_names(src: &str) -> Vec<String> {
-        let g = graph(src);
-        g.all_bindings().map(|(_, b)| b.name.clone()).collect()
     }
 
     #[test]
@@ -601,6 +643,45 @@ mod tests {
         // A documented limitation: the pattern is recorded coarsely.
         let g = graph("var { a, b } = obj;");
         let _ = g.all_bindings().count();
+    }
+
+    #[test]
+    fn object_destructuring_binds_each_name() {
+        let g = graph("const { a, b } = obj;");
+        assert!(g.resolve(g.root, "a").is_some(), "shorthand key binds");
+        assert!(g.resolve(g.root, "b").is_some());
+    }
+
+    #[test]
+    fn renamed_destructuring_binds_the_value() {
+        let g = graph("const { a: x } = obj;");
+        assert!(g.resolve(g.root, "x").is_some(), "the value name binds");
+        assert!(g.resolve(g.root, "a").is_none(), "the key is not a binding");
+    }
+
+    #[test]
+    fn array_destructuring_binds_elements() {
+        let g = graph("const [x, y] = arr;");
+        assert!(g.resolve(g.root, "x").is_some());
+        assert!(g.resolve(g.root, "y").is_some());
+    }
+
+    #[test]
+    fn nested_destructuring_binds_inner_names() {
+        let g = graph("const { a: { b } } = obj;");
+        assert!(g.resolve(g.root, "b").is_some(), "nested pattern names bind");
+    }
+
+    #[test]
+    fn destructured_parameter_binds() {
+        let g = graph("function f({ id }) { return id; }");
+        let f_scope = g
+            .scopes
+            .iter()
+            .find(|s| s.kind == ScopeKind::Function)
+            .expect("function scope");
+        assert!(f_scope.binding("id").is_some(), "a destructured param binds");
+        assert_eq!(f_scope.binding("id").unwrap().kind, BindingKind::Param);
     }
 
     #[test]

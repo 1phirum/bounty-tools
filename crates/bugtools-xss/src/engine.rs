@@ -12,7 +12,7 @@ use crate::exploitability::{
 use crate::parser::html::ContextMethod;
 use crate::reflection::correlate;
 use crate::strategy::build_strategy;
-use crate::taint::graph::build_graph;
+use crate::taint::build_graph;
 use crate::technology::{detect, observations_from_response};
 
 /// Input to a single engine run.
