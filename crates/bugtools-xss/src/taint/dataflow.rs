@@ -27,6 +27,18 @@
 //! total work is budget-capped, so the analysis always terminates. Built-in
 //! calls, methods, and cross-script functions stay opaque â€” a value passed
 //! to one is not traced further.
+//!
+//! Property taint is keyed by *alias* rather than by a dotted path: an object
+//! created at a literal or `new` node is one alias, and it rides along with
+//! the value, so `var o = obj; o.data = v` writes the same store `obj.data`
+//! reads, and `{ ...src }` carries the source's properties onto the new
+//! object. What the analysis deliberately does not model, and answers
+//! conservatively instead: a property whose key is computed at runtime
+//! (`o[k]`) names an unknown property, so no store is recorded; the result of
+//! an opaque call carries no aliases, so a property written on it is lost;
+//! `this` is one alias for the whole receiver; and one allocation site in two
+//! separate calls is one alias, so a factory called with clean and tainted
+//! arguments may attribute the tainted call's property to the clean one.
 
 use std::collections::{HashMap, HashSet};
 
@@ -53,13 +65,23 @@ pub fn build(script: &str) -> TaintGraph {
 
 /// A signature of a taint state: enough to decide that two states behave
 /// identically in the analysis (the origin that taints them, whether a
-/// sanitizer was seen, and the transforms recorded). Used as the
-/// interprocedural cache key, so the summary for a `(function, arguments)`
-/// pair is computed once.
+/// sanitizer was seen, and the transforms recorded).
 type TaintSig = Option<(usize, bool, Vec<String>)>;
 
 fn taint_sig(st: &Option<TaintState>) -> TaintSig {
     st.as_ref().map(|s| (s.origin.offset, s.sanitized, s.transforms.clone()))
+}
+
+/// A signature of a value: its taint signature plus the objects it may
+/// reference. Used as the interprocedural cache key, so the summary for a
+/// `(function, arguments)` pair is computed once.
+type ValSig = (TaintSig, Vec<Alias>);
+
+fn value_sig(v: &Option<Value>) -> ValSig {
+    match v {
+        Some(v) => (taint_sig(&v.taint), v.aliases.clone()),
+        None => (None, Vec::new()),
+    }
 }
 
 /// The hard cap on interprocedural analyses for one script. The call stack
@@ -91,13 +113,72 @@ impl TaintState {
 
 /// Merge several states into one, keeping the first (source-order) origin
 /// and every transformation seen on any branch.
-fn combine(states: Vec<Option<TaintState>>) -> Option<TaintState> {
+fn combine_taint(states: Vec<Option<TaintState>>) -> Option<TaintState> {
     let mut iter = states.into_iter().flatten();
     let mut out = iter.next()?;
     for st in iter {
         out.transforms.extend(st.transforms);
     }
     Some(out)
+}
+
+/// An abstract object: the identity a property store or read is keyed by.
+///
+/// Property taint used to be keyed by a dotted string path (`box.data`), so a
+/// copy (`var o = obj`) or a spread (`var o = { ...src }`) broke the
+/// connection. An alias is the object a value refers to, and it flows with the
+/// value, so two names for one object resolve to the same property store.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Alias {
+    /// An object or array created at this node: a literal, or `new`.
+    Site(NodeId),
+    /// A name reached without a creation site — `window`, `this`, a value from
+    /// an unmodelled call. All property accesses through the name meet, which
+    /// is sound for one variable and the fallback when identity is unknown.
+    Name(String),
+}
+
+/// A value the analysis tracks: how it is tainted, if at all, and the abstract
+/// objects it may reference. Aliases ride along with taint so they propagate
+/// through assignments, returns and parameters exactly the same way.
+#[derive(Debug, Clone)]
+struct Value {
+    taint: Option<TaintState>,
+    aliases: Vec<Alias>,
+}
+
+impl Value {
+    fn from_taint(st: TaintState) -> Self {
+        Self { taint: Some(st), aliases: Vec::new() }
+    }
+
+    fn site(id: NodeId) -> Self {
+        Self { taint: None, aliases: vec![Alias::Site(id)] }
+    }
+
+    fn named(name: &str) -> Self {
+        Self { taint: None, aliases: vec![Alias::Name(name.to_string())] }
+    }
+}
+
+/// Merge several values: the combined taint, and every object any branch may
+/// reference.
+fn combine(states: Vec<Option<Value>>) -> Option<Value> {
+    let mut taints = Vec::with_capacity(states.len());
+    let mut aliases: Vec<Alias> = Vec::new();
+    for st in states.into_iter().flatten() {
+        taints.push(st.taint);
+        for a in st.aliases {
+            if !aliases.contains(&a) {
+                aliases.push(a);
+            }
+        }
+    }
+    let taint = combine_taint(taints);
+    if taint.is_none() && aliases.is_empty() {
+        return None;
+    }
+    Some(Value { taint, aliases })
 }
 
 /// How a call affects a tainted value flowing through it.
@@ -161,12 +242,13 @@ struct Analyzer<'a> {
     scopes: &'a ScopeGraph,
     sources: Vec<SourceRead>,
     sinks: Vec<SinkCall>,
-    /// Tainted bindings, keyed by declaration range.
-    bindings: HashMap<(usize, usize), TaintState>,
-    /// Tainted implicit globals (assigned without a declaration).
-    globals: HashMap<String, TaintState>,
-    /// Tainted property paths (`obj.prop`), coarse â€” real aliasing is P1.4.
-    props: HashMap<String, TaintState>,
+    /// Values bound to declared bindings, keyed by declaration range.
+    bindings: HashMap<(usize, usize), Value>,
+    /// Values bound to implicit globals (assigned without a declaration).
+    globals: HashMap<String, Value>,
+    /// Values stored on an object's property, keyed by the object's alias and
+    /// the property name.
+    props: HashMap<(Alias, String), Value>,
     flows: Vec<TaintFlow>,
     /// Every function in the script, keyed by its own range, so a binding's
     /// initializer range resolves to the function node it declares.
@@ -175,10 +257,10 @@ struct Analyzer<'a> {
     /// recursion and is refused rather than followed.
     call_stack: Vec<NodeId>,
     /// Cached summaries: (function, argument context, shared state) -> the
-    /// taint the function returns. A miss is computed once and reused.
-    summaries: HashMap<(NodeId, Vec<TaintSig>, Vec<(String, TaintSig)>), Option<TaintState>>,
+    /// value the function returns. A miss is computed once and reused.
+    summaries: HashMap<(NodeId, Vec<ValSig>, Vec<(String, ValSig)>), Option<Value>>,
     /// Return values collected while walking the current function body.
-    returns: Vec<Option<TaintState>>,
+    returns: Vec<Option<Value>>,
     /// Flows already recorded, by identity: a source-to-sink pair reached the
     /// same way is one flow, however many walks observe it.
     seen_flows: HashSet<(usize, usize, bool, Vec<String>)>,
@@ -188,9 +270,9 @@ struct Analyzer<'a> {
 
 /// How a call's callee was handled by the interprocedural analysis.
 enum CallTrace {
-    /// The callee was traced into. Carries the taint of the value it returns,
-    /// which is [`None`] when the function returns clean.
-    Modelled(Option<TaintState>),
+    /// The callee was traced into. Carries the value it returns, which is
+    /// [`None`] when the function returns clean.
+    Modelled(Option<Value>),
     /// The callee is not traced â€” a builtin, a method, a name this script does
     /// not declare â€” so the callee and its arguments are the value's
     /// provenance, and a sink in the callee's range consumes them at the call.
@@ -375,8 +457,10 @@ impl<'a> Analyzer<'a> {
     // Expression evaluation
     // ------------------------------------------------------------------
 
-    /// The taint state of an expression: `None` when the value is clean.
-    fn eval(&mut self, id: NodeId) -> Option<TaintState> {
+    /// The value of an expression: how it is tainted, if at all, and the
+    /// abstract objects it may reference. `None` when the expression is clean
+    /// and refers to nothing the analysis tracks.
+    fn eval(&mut self, id: NodeId) -> Option<Value> {
         match self.tree.node(id).kind {
             // Literals: a source read may appear directly inside one.
             SyntaxKind::StringLit
@@ -385,7 +469,7 @@ impl<'a> Analyzer<'a> {
             | SyntaxKind::NullLit
             | SyntaxKind::RegexLit => {
                 if let Some(src) = self.source_within(id) {
-                    return Some(TaintState::from_source(src));
+                    return Some(Value::from_taint(TaintState::from_source(src)));
                 }
                 None
             }
@@ -399,27 +483,33 @@ impl<'a> Analyzer<'a> {
             }
             SyntaxKind::Ident => {
                 if let Some(src) = self.source_within(id) {
-                    return Some(TaintState::from_source(src));
+                    return Some(Value::from_taint(TaintState::from_source(src)));
                 }
-                self.read_binding(id)
+                // A declared binding carries its aliases with its taint. A
+                // name this script never declares (`window`, an implicit
+                // global) is itself a name alias, so every property access
+                // through it resolves to one store.
+                self.read_binding(id).or_else(|| Some(Value::named(self.tree.node_text(id))))
             }
-            // `obj.prop` â€” taint flows from the object; otherwise a source
-            // may start exactly here (`location.hash`), or a previously
-            // written property may be read back.
+            // `this`: one alias for the receiver, coarse but sound.
+            SyntaxKind::This => Some(Value::named("this")),
+            // `obj.prop` / `obj['prop']` — a static property read. The
+            // object's own value joins the store keyed by its aliases, so a
+            // written property is read back through every name for the
+            // object. A source may also start exactly here (`location.hash`):
+            // the member's span carries the read, and supersedes the store.
             SyntaxKind::Member => {
-                let obj = self.tree.node(id).children.first().copied();
-                let mut st = obj.and_then(|o| self.eval(o));
-                if st.is_none() {
-                    if let Some(src) = self.source_within(id) {
-                        st = Some(TaintState::from_source(src));
-                    }
+                if let Some(src) = self.source_within(id) {
+                    return Some(Value::from_taint(TaintState::from_source(src)));
                 }
-                if st.is_none() {
-                    if let Some(path) = self.member_path(id) {
-                        st = self.props.get(&path).cloned();
-                    }
+                if let Some((obj, prop)) = static_member(self.tree, id) {
+                    let obj_val = self.eval(obj);
+                    return self.read_property(obj_val, &prop);
                 }
-                st
+                // A computed index with a dynamic key (`o[k]`): only the
+                // object's own value is known.
+                let children = self.tree.node(id).children.clone();
+                combine(children.into_iter().map(|c| self.eval(c)).collect())
             }
             // `f(args)` â€” a sink consumes its arguments here; a sanitizer or
             // transform is classified from the callee structure.
@@ -432,7 +522,7 @@ impl<'a> Analyzer<'a> {
                 for &arg in args {
                     states.push(self.eval(arg));
                 }
-                let combined = match self.analyze_call(callee, &states) {
+                let mut combined = match self.analyze_call(callee, &states) {
                     // The callee was traced: its value is what the body
                     // returns. A return derived from an argument supersedes
                     // that argument â€” it is the same data, carrying the
@@ -441,12 +531,14 @@ impl<'a> Analyzer<'a> {
                     // from elsewhere, and every argument it does not derive
                     // from, is independent data and is kept.
                     CallTrace::Modelled(Some(ret)) => {
-                        let origin = ret.origin.offset;
+                        let origin = ret.taint.as_ref().map(|t| t.origin.offset);
                         let mut combined = vec![Some(ret)];
                         for st in &states {
-                            match st {
-                                Some(st) if st.origin.offset == origin => {}
-                                other => combined.push(other.clone()),
+                            let arg_origin =
+                                st.as_ref().and_then(|v| v.taint.as_ref().map(|t| t.origin.offset));
+                            let superseded = matches!((origin, arg_origin), (Some(a), Some(b)) if a == b);
+                            if !superseded {
+                                combined.push(st.clone());
                             }
                         }
                         combine(combined)
@@ -465,37 +557,49 @@ impl<'a> Analyzer<'a> {
                         states.push(self.eval(callee));
                         let combined = combine(states);
                         if let Some(sink) = self.sink_within(callee).cloned() {
-                            if let Some(st) = &combined {
-                                self.record_flow(&sink, st);
+                            if let Some(v) = &combined {
+                                self.record_flow(&sink, v);
                             }
                         }
                         combined
                     }
                 };
-                let mut combined = combined;
-                if let Some(ref mut st) = combined {
+                if let Some(ref mut v) = combined {
                     let name = self.callee_name(callee);
                     match classify_call(&name) {
-                        Some(CallClass::Sanitizer) => st.sanitized = true,
-                        Some(CallClass::Transform(op)) => st.transforms.push(op),
+                        Some(CallClass::Sanitizer) => {
+                            if let Some(ref mut t) = v.taint {
+                                t.sanitized = true;
+                            }
+                        }
+                        Some(CallClass::Transform(op)) => {
+                            if let Some(ref mut t) = v.taint {
+                                t.transforms.push(op);
+                            }
+                        }
                         None => {}
                     }
                 }
                 combined
             }
-            // `new Foo(args)` â€” a sink may appear in the constructor name.
+            // `new Foo(args)` â€” a sink may appear in the constructor name. The
+            // result is a fresh object whose identity is this allocation site.
             SyntaxKind::New => {
                 let children = self.tree.node(id).children.clone();
-                let combined = combine(children.into_iter().map(|c| self.eval(c)).collect());
+                let mut combined = combine(children.into_iter().map(|c| self.eval(c)).collect());
                 if let Some(sink) = self.sink_within(id).cloned() {
-                    if let Some(st) = &combined {
-                        self.record_flow(&sink, st);
+                    if let Some(v) = &combined {
+                        self.record_flow(&sink, v);
                     }
+                }
+                match &mut combined {
+                    Some(v) => v.aliases.push(Alias::Site(id)),
+                    None => combined = Some(Value::site(id)),
                 }
                 combined
             }
             // `lhs = rhs` â€” a property-write sink consumes the right side
-            // here, and the target becomes tainted.
+            // here, and the target becomes the value.
             SyntaxKind::Assign => {
                 let children = self.tree.node(id).children.clone();
                 let Some(lhs) = children.first() else {
@@ -504,8 +608,8 @@ impl<'a> Analyzer<'a> {
                 let rhs = children.get(1).copied();
                 let st = rhs.and_then(|r| self.eval(r));
                 if let Some(sink) = self.sink_within(*lhs).cloned() {
-                    if let Some(st) = &st {
-                        self.record_flow(&sink, st);
+                    if let Some(v) = &st {
+                        self.record_flow(&sink, v);
                     }
                 }
                 self.taint_target(*lhs, st.clone());
@@ -527,6 +631,31 @@ impl<'a> Analyzer<'a> {
                     _ => None,
                 }
             }
+            // `{ ...src }` / `[ ...src ]`: the value is the operand's, and
+            // the source's stored properties become the new object's, so a
+            // property written before the spread is still read after it. The
+            // new object's own identity is this allocation site.
+            SyntaxKind::ObjectLit | SyntaxKind::ArrayLit => {
+                let children = self.tree.node(id).children.clone();
+                let mut values = Vec::with_capacity(children.len());
+                for &c in &children {
+                    let v = self.eval(c);
+                    if self.tree.node(c).kind == SyntaxKind::Spread {
+                        if let Some(ref sv) = v {
+                            for a in &sv.aliases {
+                                self.copy_properties(a, &Alias::Site(id));
+                            }
+                        }
+                    }
+                    values.push(v);
+                }
+                let mut combined = combine(values);
+                match &mut combined {
+                    Some(v) => v.aliases.push(Alias::Site(id)),
+                    None => combined = Some(Value::site(id)),
+                }
+                combined
+            }
             // Any other composite expression: taint flows through children.
             _ => {
                 let children = self.tree.node(id).children.clone();
@@ -539,23 +668,23 @@ impl<'a> Analyzer<'a> {
     // Binding taint
     // ------------------------------------------------------------------
 
-    /// Taint the binding declared/written at an identifier node.
-    fn taint_binding(&mut self, ident: NodeId, st: Option<TaintState>) {
-        let Some(st) = st else {
+    /// Store the value of the binding declared/written at an identifier node.
+    fn taint_binding(&mut self, ident: NodeId, value: Option<Value>) {
+        let Some(value) = value else {
             return;
         };
         let name = self.tree.node_text(ident).to_string();
         let offset = self.tree.node(ident).range.start;
         if let Some(b) = self.scopes.resolve_at(offset, &name) {
-            self.bindings.insert((b.range.start, b.range.end), st);
+            self.bindings.insert((b.range.start, b.range.end), value);
         } else {
             // An assignment to an undeclared name: an implicit global.
-            self.globals.insert(name, st);
+            self.globals.insert(name, value);
         }
     }
 
-    /// The taint of a binding read at an identifier node.
-    fn read_binding(&self, id: NodeId) -> Option<TaintState> {
+    /// The value of a binding read at an identifier node.
+    fn read_binding(&self, id: NodeId) -> Option<Value> {
         let name = self.tree.node_text(id);
         let offset = self.tree.node(id).range.start;
         if let Some(b) = self.scopes.resolve_at(offset, name) {
@@ -564,25 +693,64 @@ impl<'a> Analyzer<'a> {
         self.globals.get(name).cloned()
     }
 
-    /// Taint an assignment target: a binding, a property path, or every
-    /// name a destructuring pattern introduces.
-    fn taint_target(&mut self, lhs: NodeId, st: Option<TaintState>) {
-        let Some(st) = st else {
+    /// Write a value to an assignment target: a binding, a property of every
+    /// object the target may reference, or every name a destructuring pattern
+    /// introduces.
+    fn taint_target(&mut self, lhs: NodeId, value: Option<Value>) {
+        let Some(value) = value else {
             return;
         };
         match self.tree.node(lhs).kind {
-            SyntaxKind::Ident => self.taint_binding(lhs, Some(st)),
+            SyntaxKind::Ident => self.taint_binding(lhs, Some(value)),
             SyntaxKind::Member => {
-                if let Some(path) = self.member_path(lhs) {
-                    self.props.insert(path, st);
+                if let Some((obj, prop)) = static_member(self.tree, lhs) {
+                    // A store under each alias the object may reference. When
+                    // the object carries none (a primitive, an unmodelled
+                    // call result) the name itself is the key, preserving a
+                    // store through a bare global like `box.data`.
+                    let obj_val = self.eval(obj);
+                    let aliases = match obj_val.as_ref() {
+                        Some(v) if !v.aliases.is_empty() => v.aliases.clone(),
+                        _ => static_name(self.tree, obj).into_iter().collect(),
+                    };
+                    for a in aliases {
+                        self.props.insert((a, prop.clone()), value.clone());
+                    }
                 }
             }
             SyntaxKind::ObjectLit | SyntaxKind::ArrayLit => {
                 for ident in binding_idents(self.tree, lhs) {
-                    self.taint_binding(ident, Some(st.clone()));
+                    self.taint_binding(ident, Some(value.clone()));
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The value of `obj.prop`: the object's own value joined with the
+    /// property store under every alias it may reference.
+    fn read_property(&self, obj: Option<Value>, prop: &str) -> Option<Value> {
+        let aliases = obj.as_ref().map(|v| v.aliases.clone()).unwrap_or_default();
+        let mut stored = Vec::new();
+        for a in &aliases {
+            if let Some(pv) = self.props.get(&(a.clone(), prop.to_string())) {
+                stored.push(Some(pv.clone()));
+            }
+        }
+        combine(vec![obj, combine(stored)])
+    }
+
+    /// Copy every property stored on `src` onto `dst`, so an object built by
+    /// spread keeps the source's property taint.
+    fn copy_properties(&mut self, src: &Alias, dst: &Alias) {
+        let copied: Vec<((Alias, String), Value)> = self
+            .props
+            .iter()
+            .filter(|((a, _), _)| a == src)
+            .map(|(k, v)| ((dst.clone(), k.1.clone()), v.clone()))
+            .collect();
+        for (k, v) in copied {
+            self.props.insert(k, v);
         }
     }
 
@@ -612,7 +780,7 @@ impl<'a> Analyzer<'a> {
     /// return the taint that function's value carries back. Cached per
     /// (function, argument context, shared state); recursion and the budget
     /// are refused rather than followed.
-    fn analyze_call(&mut self, callee: NodeId, args: &[Option<TaintState>]) -> CallTrace {
+    fn analyze_call(&mut self, callee: NodeId, args: &[Option<Value>]) -> CallTrace {
         let Some(fn_node) = self.resolve_callee(callee) else {
             return CallTrace::Opaque;
         };
@@ -626,7 +794,7 @@ impl<'a> Analyzer<'a> {
         }
         let key = (
             fn_node,
-            args.iter().map(taint_sig).collect(),
+            args.iter().map(value_sig).collect(),
             self.state_signature(),
         );
         if let Some(ret) = self.summaries.get(&key) {
@@ -640,14 +808,14 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Walk a function body with the arguments bound to its parameters,
-    /// recording any sink reached inside, and return the taint of its value.
+    /// recording any sink reached inside, and return the value it yields.
     fn analyze_function(
         &mut self,
         fn_node: NodeId,
         params: &[NodeId],
         body: Option<NodeId>,
-        args: &[Option<TaintState>],
-    ) -> Option<TaintState> {
+        args: &[Option<Value>],
+    ) -> Option<Value> {
         // Snapshot the taint state: the callee's own locals must not leak
         // back into the caller, and a call with clean arguments must not
         // inherit the taint a previous call left on a parameter. Sinks
@@ -678,6 +846,25 @@ impl<'a> Analyzer<'a> {
             None => None,
         };
         self.call_stack.pop();
+        // Property writes the body made to objects the caller can still see
+        // are real and are kept: the aliases already tracked before the call,
+        // those the arguments carried, and those the returned value carries
+        // (a factory's product escapes with its caller). Writes to objects
+        // the callee created and kept to itself die with the call.
+        let visible: HashSet<Alias> = props
+            .keys()
+            .map(|(a, _)| a.clone())
+            .chain(bindings.values().flat_map(|v| v.aliases.clone()))
+            .chain(globals.values().flat_map(|v| v.aliases.clone()))
+            .chain(args.iter().flat_map(|v| v.as_ref().map(|v| v.aliases.clone()).unwrap_or_default()))
+            .chain(ret.as_ref().map(|v| v.aliases.clone()).unwrap_or_default())
+            .collect();
+        let mut props = props;
+        for ((alias, prop), v) in std::mem::take(&mut self.props) {
+            if visible.contains(&alias) {
+                props.insert((alias, prop), v);
+            }
+        }
         self.bindings = bindings;
         self.globals = globals;
         self.props = props;
@@ -685,10 +872,10 @@ impl<'a> Analyzer<'a> {
         ret
     }
 
-    /// Set the taint state of every name a parameter binds: tainted when the
-    /// argument is tainted, and explicitly cleared otherwise so a clean
+    /// Set the value of every name a parameter binds: the argument's value
+    /// when there is one, and explicitly cleared otherwise so a clean
     /// argument cannot inherit a previous call's taint.
-    fn bind_param(&mut self, param: NodeId, st: Option<TaintState>) {
+    fn bind_param(&mut self, param: NodeId, st: Option<Value>) {
         for ident in param_idents(self.tree, param) {
             let name = self.tree.node_text(ident);
             let offset = self.tree.node(ident).range.start;
@@ -707,17 +894,21 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    /// A signature of the taint state shared with a callee: the bindings,
-    /// globals and properties visible at the call. Two calls whose arguments
-    /// *and* shared state match behave identically, so the cached summary is
+    /// A signature of the state shared with a callee: the bindings, globals
+    /// and properties visible at the call. Two calls whose arguments *and*
+    /// shared state match behave identically, so the cached summary is
     /// exact. Sorted because the maps iterate in arbitrary order.
-    fn state_signature(&self) -> Vec<(String, TaintSig)> {
-        let mut sig: Vec<(String, TaintSig)> = self
+    fn state_signature(&self) -> Vec<(String, ValSig)> {
+        let mut sig: Vec<(String, ValSig)> = self
             .bindings
             .iter()
-            .map(|((s, e), st)| (format!("b-{s}-{e}"), taint_sig(&Some(st.clone()))))
-            .chain(self.globals.iter().map(|(n, st)| (format!("g-{n}"), taint_sig(&Some(st.clone())))))
-            .chain(self.props.iter().map(|(n, st)| (format!("p-{n}"), taint_sig(&Some(st.clone())))))
+            .map(|((s, e), v)| (format!("b-{s}-{e}"), value_sig(&Some(v.clone()))))
+            .chain(self.globals.iter().map(|(n, v)| (format!("g-{n}"), value_sig(&Some(v.clone())))))
+            .chain(
+                self.props
+                    .iter()
+                    .map(|((a, p), v)| (format!("p-{:?}.{}", a, p), value_sig(&Some(v.clone())))),
+            )
             .collect();
         sig.sort_by(|a, b| a.0.cmp(&b.0));
         sig
@@ -727,7 +918,11 @@ impl<'a> Analyzer<'a> {
     // Flow recording
     // ------------------------------------------------------------------
 
-    fn record_flow(&mut self, sink: &SinkCall, st: &TaintState) {
+    fn record_flow(&mut self, sink: &SinkCall, value: &Value) {
+        // A value with no taint reaches nothing, however many aliases it has.
+        let Some(st) = &value.taint else {
+            return;
+        };
         // The same source-to-sink pair may be observed by more than one walk
         // (a function is descended into at the top level and again at its
         // call site). It is one flow, recorded once.
@@ -752,6 +947,47 @@ impl<'a> Analyzer<'a> {
             sanitized: st.sanitized,
             sink_risk: sink.risk.label().to_string(),
         });
+    }
+}
+
+/// The object and property of a *static* member expression `obj.prop` or
+/// `obj['prop']`: an identifier or literal key names the property, so the
+/// store can be keyed by it. A computed key (`o[k]`) resolves to nothing —
+/// the property it reads is unknown, and is not tracked.
+fn static_member(tree: &SyntaxTree, id: NodeId) -> Option<(NodeId, String)> {
+    if tree.node(id).kind != SyntaxKind::Member {
+        return None;
+    }
+    let children = tree.node(id).children.clone();
+    let obj = *children.first()?;
+    let prop = children.get(1)?;
+    let key = match tree.node(*prop).kind {
+        SyntaxKind::Ident => tree.node_text(*prop).to_string(),
+        SyntaxKind::StringLit => unquote(tree.node_text(*prop)),
+        SyntaxKind::NumberLit => tree.node_text(*prop).to_string(),
+        _ => return None,
+    };
+    Some((obj, key))
+}
+
+/// The name alias of an identifier or `this` node: the fallback identity for
+/// a property store when the object is otherwise untracked.
+fn static_name(tree: &SyntaxTree, id: NodeId) -> Option<Alias> {
+    match tree.node(id).kind {
+        SyntaxKind::Ident => Some(Alias::Name(tree.node_text(id).to_string())),
+        SyntaxKind::This => Some(Alias::Name("this".to_string())),
+        _ => None,
+    }
+}
+
+/// Strip one matched pair of quotes from a string-literal key.
+fn unquote(s: &str) -> String {
+    let s = s.trim();
+    match (s.as_bytes().first(), s.as_bytes().last()) {
+        (Some(&q), Some(&q2)) if q == q2 && (q == b'"' || q == b'\'') && s.len() >= 2 => {
+            s[1..s.len() - 1].to_string()
+        }
+        _ => s.to_string(),
     }
 }
 
@@ -1306,5 +1542,98 @@ mod tests {
         assert_eq!(f.len(), 2, "distinct paths to the same pair are distinct flows");
         assert_eq!(f.iter().filter(|x| !x.sanitized).count(), 1);
         assert_eq!(f.iter().filter(|x| x.sanitized).count(), 1);
+    }
+
+    // -----------------------------------------------------------------
+    // Alias analysis (P1.4b)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn copy_alias_carries_property_write() {
+        // The failure the dotted-path key could not represent: a write through
+        // a copy is read back through the original, because both names resolve
+        // to one alias.
+        let f = flows(
+            "var v = location.hash;\nvar box = {};\nvar o = box;\no.data = v;\nel.innerHTML = box.data;",
+        );
+        assert_eq!(f.len(), 1, "a write through a copy must reach the original");
+    }
+
+    #[test]
+    fn distinct_objects_do_not_share_properties() {
+        // The converse: two objects are two aliases, so a property of one is
+        // not a property of the other.
+        let f = flows(
+            "var v = location.hash;\nvar a = {};\nvar b = {};\na.data = v;\nel.innerHTML = b.data;",
+        );
+        assert!(f.is_empty(), "sibling objects must not share a property store: {:?}", f);
+    }
+
+    #[test]
+    fn spread_copies_property_taint() {
+        // `{ ...src }` copies the source's stored properties onto the new
+        // object's allocation site.
+        let f = flows(
+            "var v = location.hash;\nvar src = {};\nsrc.data = v;\nvar o = { ...src };\nel.innerHTML = o.data;",
+        );
+        assert_eq!(f.len(), 1, "a spread must carry the source's property taint");
+    }
+
+    #[test]
+    fn array_spread_copies_element_taint() {
+        let f = flows(
+            "var v = location.hash;\nvar src = [];\nsrc[0] = v;\nvar o = [ ...src ];\nel.innerHTML = o[0];",
+        );
+        assert_eq!(f.len(), 1, "an array spread must carry the source's element taint");
+    }
+
+    #[test]
+    fn string_key_property_write_and_read() {
+        // `o['data']` and `o.data` name the same property.
+        let f = flows(
+            "var v = location.hash;\nvar o = {};\no['data'] = v;\nel.innerHTML = o.data;",
+        );
+        assert_eq!(f.len(), 1, "a string key must resolve to the same property");
+    }
+
+    #[test]
+    fn computed_dynamic_key_is_not_tracked() {
+        // A key only known at runtime names an unknown property: no store is
+        // recorded, so the read finds nothing. A documented limitation, and
+        // the conservative answer.
+        let f = flows(
+            "var v = location.hash;\nvar o = {};\nvar k = 'data';\no[k] = v;\nel.innerHTML = o.data;",
+        );
+        assert!(f.is_empty(), "a dynamic key must not fabricate a property flow: {:?}", f);
+    }
+
+    #[test]
+    fn callee_mutates_caller_object_property() {
+        // The mutator pattern: the callee writes a property of an object the
+        // caller passed, and the caller reads it back after the call.
+        let f = flows(
+            "function set(o, v) { o.data = v; }\nvar box = {};\nset(box, location.hash);\nel.innerHTML = box.data;",
+        );
+        assert_eq!(f.len(), 1, "a callee's property write to a caller object must survive the call");
+    }
+
+    #[test]
+    fn factory_carries_property_taint_out() {
+        // The factory pattern: the callee builds the object it returns, so the
+        // returned object's properties escape with it.
+        let f = flows(
+            "function make(v) { var o = {}; o.data = v; return o; }\nvar r = make(location.hash);\nel.innerHTML = r.data;",
+        );
+        assert_eq!(f.len(), 1, "a factory's property taint must reach the caller");
+    }
+
+    #[test]
+    fn callee_local_object_does_not_leak() {
+        // The callee's own object is not visible to the caller, so a property
+        // written on it never reaches a store the caller can read.
+        let f = flows(
+            "function f(v) { var o = {}; o.data = v; }\nvar box = {};\nf(location.hash);\nel.innerHTML = box.data;",
+        );
+        assert!(f.is_empty(), "a callee-local object must not leak: {:?}", f);
     }
 }
