@@ -5,15 +5,18 @@
 //! guess at â€” *does the value reaching this sink trace back to this
 //! source?* â€” is now answered structurally:
 //!
-//! 1. [`detect_sources`] / [`detect_sinks`] stay the evidence feeders: they
-//!    decide *which* APIs are sources and sinks, and where they occur.
+//! 1. [`detect_sources_in_tree`] / [`detect_sinks_in_tree`] are the evidence
+//!    feeders: they decide *which* APIs are sources and sinks, and they
+//!    anchor each to the node that reads or performs it, so a source named in
+//!    a string is not a read and a sink named in a comment is not an operation.
 //! 2. The syntax tree decides *how data moves*: a value is tainted by a
 //!    source read, propagates through assignments, declarations, member
 //!    accesses, calls, arrays and template interpolations, and is checked
 //!    at each sink argument.
 //! 3. Sanitizers and transforms are classified from the *call structure*
 //!    instead of a substring match over a byte window, so a sanitizer must
-//!    really sit on the path, not merely appear nearby.
+//!    really sit on the path, not merely appear nearby. A sanitizer's
+//!    protection is per-sink-context: see [`crate::sanitize`].
 //!
 //! The analysis is deliberately conservative: it records a flow only when
 //! the code structure supports it, and never invents a path it did not see.
@@ -46,19 +49,24 @@ use crate::parser::js::ast::SyntaxKind;
 use crate::parser::js::scope::binding_idents;
 use crate::parser::js::{parse_script, NodeId, ScopeGraph, SyntaxTree};
 use crate::sanitize::{classify_sanitizer, SanitizerKind};
-use crate::sink::detector::{detect_sinks, SinkCall};
-use crate::source::detector::{detect_sources, SourceRead};
+use crate::sink::detector::{detect_sinks_in_tree, SinkCall};
+use crate::source::detector::{detect_sources_in_tree, SourceRead};
 use crate::taint::graph::{TaintEdge, TaintFlow, TaintGraph, TaintNode, TaintNodeKind};
 
 /// Build the taint graph for one script by walking its syntax tree.
 pub fn build(script: &str) -> TaintGraph {
-    let sources = detect_sources(script);
-    let sinks = detect_sinks(script);
-    if sources.is_empty() || sinks.is_empty() {
-        return TaintGraph::default();
-    }
     let tree = parse_script(script);
     let scopes = ScopeGraph::build(&tree);
+    // Sources and sinks are located in the tree, not by scanning the text:
+    // a source is a read node, a sink is the node that performs the write.
+    let sources = detect_sources_in_tree(&tree);
+    if sources.is_empty() {
+        return TaintGraph::default();
+    }
+    let sinks = detect_sinks_in_tree(&tree);
+    if sinks.is_empty() {
+        return TaintGraph::default();
+    }
     let mut analyzer = Analyzer::new(&tree, &scopes, sources, sinks);
     analyzer.run();
     analyzer.finish()
@@ -238,8 +246,10 @@ fn classify_call(name: &str) -> Option<CallClass> {
 struct Analyzer<'a> {
     tree: &'a SyntaxTree,
     scopes: &'a ScopeGraph,
-    sources: Vec<SourceRead>,
-    sinks: Vec<SinkCall>,
+    sources: HashMap<NodeId, SourceRead>,
+    /// Sinks keyed by the node that performs them: a flow is recorded against
+    /// the exact construct, not anything in its vicinity.
+    sinks: HashMap<NodeId, SinkCall>,
     /// Values bound to declared bindings, keyed by declaration range.
     bindings: HashMap<(usize, usize), Value>,
     /// Values bound to implicit globals (assigned without a declaration).
@@ -278,7 +288,12 @@ enum CallTrace {
 }
 
 impl<'a> Analyzer<'a> {
-    fn new(tree: &'a SyntaxTree, scopes: &'a ScopeGraph, sources: Vec<SourceRead>, sinks: Vec<SinkCall>) -> Self {
+    fn new(
+        tree: &'a SyntaxTree,
+        scopes: &'a ScopeGraph,
+        sources: Vec<(NodeId, SourceRead)>,
+        sinks: Vec<(NodeId, SinkCall)>,
+    ) -> Self {
         let fn_by_range = tree
             .all_nodes()
             .into_iter()
@@ -296,8 +311,8 @@ impl<'a> Analyzer<'a> {
         Self {
             tree,
             scopes,
-            sources,
-            sinks,
+            sources: sources.into_iter().collect(),
+            sinks: sinks.into_iter().collect(),
             bindings: HashMap::new(),
             globals: HashMap::new(),
             props: HashMap::new(),
@@ -339,22 +354,18 @@ impl<'a> Analyzer<'a> {
     // Source / sink location
     // ------------------------------------------------------------------
 
-    /// The source read whose match span lies within this node's range, if
-    /// any. The span (not just the start) is required so that
-    /// `location.hash` matches the `location.hash` member rather than a
-    /// bare `location` identifier.
+    /// The source read performed *by this node*, if it is one. Because sources
+    /// are keyed by the read node, a source named in a string or a comment is a
+    /// different node and never matches.
     fn source_within(&self, id: NodeId) -> Option<&SourceRead> {
-        let range = self.tree.node(id).range;
-        self.sources.iter().find(|s| {
-            let span_end = s.offset + s.kind.label().len();
-            range.start <= s.offset && range.end >= span_end
-        })
+        self.sources.get(&id)
     }
 
-    /// The sink whose offset lies within this node's range.
+    /// The sink performed *by this node*, if it is one. Because sinks are
+    /// keyed by the node that performs them, this is an exact match: a sink
+    /// named in a string or a comment is a different node and never matches.
     fn sink_within(&self, id: NodeId) -> Option<&SinkCall> {
-        let range = self.tree.node(id).range;
-        self.sinks.iter().find(|s| range.contains(s.offset))
+        self.sinks.get(&id)
     }
 
     /// The dotted callee name of a call (`escapeHtml`, `DOMPurify.sanitize`,
@@ -1186,6 +1197,30 @@ mod tests {
         // is recorded at all. It is also not a sanitizer of the value.
         let f = flows("el.textContent = location.hash;");
         assert!(f.is_empty(), "textContent must not be a sink: {:?}", f);
+    }
+
+    #[test]
+    fn source_named_in_a_string_is_not_a_source() {
+        // A source API mentioned in a string literal is not a read of it, so
+        // the literal carries no taint. The text scan could not tell the two
+        // apart.
+        let f = flows("var s = \"location.hash\";\nel.innerHTML = s;");
+        assert!(f.is_empty(), "a string mentioning a source must not be a source: {:?}", f);
+    }
+
+    #[test]
+    fn sink_named_in_a_string_is_not_a_sink() {
+        // Likewise a sink named in a string literal performs no operation.
+        let f = flows("var v = location.hash;\nvar s = \"el.innerHTML = x\";\nel.innerHTML = v;");
+        assert_eq!(f.len(), 1, "only the real sink may record a flow: {:?}", f);
+    }
+
+    #[test]
+    fn property_read_is_not_a_sink() {
+        // Reading `el.innerHTML` is not assigning to it: the read is not a
+        // sink, so the value it yields is not a flow's target.
+        let f = flows("var v = location.hash;\nvar x = el.innerHTML;\nel2.innerHTML = v;");
+        assert_eq!(f.len(), 1, "a property read must not be a sink: {:?}", f);
     }
 
     #[test]
