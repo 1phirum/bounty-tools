@@ -609,11 +609,10 @@ impl<'a> Parser<'a> {
                     }
                 }
                 // Tagged template: `` tag`...` ``
-                (TokenKind::Template, _) => {
-                    let tmpl = self.cur.bump();
-                    let tmpl_id = self.push(SyntaxKind::TemplateLit, vec![], tmpl.range);
-                    let range = self.span2(expr, tmpl_id);
-                    expr = self.push(SyntaxKind::Call, vec![expr, tmpl_id], range);
+                (TokenKind::TemplateHead | TokenKind::TemplateTail, _) => {
+                    let tmpl = self.parse_template();
+                    let range = self.span2(expr, tmpl);
+                    expr = self.push(SyntaxKind::Call, vec![expr, tmpl], range);
                 }
                 _ => return Some(expr),
             }
@@ -661,13 +660,51 @@ impl<'a> Parser<'a> {
                 let t = self.cur.bump();
                 Some(self.push(SyntaxKind::NumberLit, vec![], t.range))
             }
-            TokenKind::Template => {
-                let t = self.cur.bump();
-                Some(self.push(SyntaxKind::TemplateLit, vec![], t.range))
-            }
+            TokenKind::TemplateHead => Some(self.parse_template()),
             // Computed property on a member access is handled by the caller.
             _ => None,
         }
+    }
+    /// A template literal, with or without interpolations. The lexer emits a
+    /// lone tail for `` `text` `` (no `${`) and a head/middle/tail sequence
+    /// otherwise; both shapes become one [`SyntaxKind::TemplateLit`] node,
+    /// its interpolations as children.
+    fn parse_template(&mut self) -> NodeId {
+        if self.cur.peek().kind == TokenKind::TemplateHead {
+            return self.parse_template_segments();
+        }
+        let t = self.cur.bump();
+        self.push(SyntaxKind::TemplateLit, vec![], t.range)
+    }
+
+    /// `` `head ${ expr } … tail` `` — a template with interpolations. The
+    /// lexer hands over head/middle/tail segment tokens interleaved with the
+    /// interpolations' own tokens; each expression parses as a child, so a
+    /// value interpolated into a template is traceable like any other
+    /// expression.
+    fn parse_template_segments(&mut self) -> NodeId {
+        let start = self.cur.bump().range.start; // TemplateHead
+        let mut children = Vec::new();
+        loop {
+            // The expression of one interpolation. An empty interpolation
+            // (`${}`) parses to nothing and the tail follows immediately.
+            if let Some(expr) = self.parse_assignment() {
+                children.push(expr);
+            }
+            match self.cur.peek().kind {
+                TokenKind::TemplateMiddle => {
+                    self.cur.bump();
+                }
+                TokenKind::TemplateTail => {
+                    self.cur.bump();
+                    break;
+                }
+                // Malformed (unterminated) input: stop rather than spin.
+                _ => break,
+            }
+        }
+        let end = self.span(&children).end.max(start);
+        self.push(SyntaxKind::TemplateLit, children, SourceRange { start, end })
     }
 
     fn parse_args(&mut self) -> Vec<NodeId> {
@@ -731,10 +768,11 @@ impl<'a> Parser<'a> {
                 let t = self.cur.bump();
                 Some(self.push(SyntaxKind::StringLit, vec![], t.range))
             }
-            (TokenKind::Template, _) => {
-                let t = self.cur.bump();
-                Some(self.push(SyntaxKind::TemplateLit, vec![], t.range))
-            }
+            // A template literal: `` `head ${ expr } tail` ``. The lexer emits
+            // head/middle/tail segments around the interpolation tokens, so the
+            // expressions between them parse as real children. A template with
+            // no interpolation is a lone tail segment.
+            (TokenKind::TemplateHead | TokenKind::TemplateTail, _) => Some(self.parse_template()),
             (TokenKind::Number, _) => {
                 let t = self.cur.bump();
                 Some(self.push(SyntaxKind::NumberLit, vec![], t.range))

@@ -96,20 +96,56 @@ pub fn lex_at(source: &str, offset: usize) -> JavaScriptParseContext {
 fn ast_context(source: &str, offset: usize) -> Option<JavaScriptParseContext> {
     let tree = parse_script(source);
     let parents = enclosing_templates(&tree, offset);
+    let in_expr = in_template_interpolation(&tree, offset);
 
-    // Token-level classification is authoritative for comments and
-    // literals: the AST creates no nodes for comments, and treats literals
-    // (including templates) as opaque leaves.
+    // Token-level classification is authoritative for comments and literals.
+    // Template segments are the literal text of a template; anything else
+    // inside an enclosing template is a `${ ... }` interpolation position.
     if let Some(tok) = tree.tokens.iter().find(|t| t.contains(offset)) {
-        if let Some(node_type) = token_node_type(tok, source, offset) {
-            return Some(JavaScriptParseContext {
-                node_type,
-                source_range: tok.range,
-                parent_nodes: parents,
-                confidence: 0.92,
-                method: ContextMethod::Ast,
-            });
+        match tok.kind {
+            TokenKind::TemplateHead | TokenKind::TemplateMiddle | TokenKind::TemplateTail => {
+                return Some(JavaScriptParseContext {
+                    node_type: JavaScriptNodeType::TemplateLiteral,
+                    source_range: tok.range,
+                    parent_nodes: parents,
+                    confidence: 0.92,
+                    method: ContextMethod::Ast,
+                });
+            }
+            _ => {
+                if let Some(node_type) = token_node_type(tok) {
+                    return Some(JavaScriptParseContext {
+                        node_type: if in_expr {
+                            JavaScriptNodeType::TemplateExpression
+                        } else {
+                            node_type
+                        },
+                        source_range: tok.range,
+                        parent_nodes: parents,
+                        confidence: 0.92,
+                        method: ContextMethod::Ast,
+                    });
+                }
+            }
         }
+    }
+
+    // A non-literal position inside an interpolation is an expression
+    // position, and the enclosing templates are its parents.
+    if in_expr {
+        let range = tree
+            .tokens
+            .iter()
+            .find(|t| t.contains(offset))
+            .map(|t| t.range)
+            .unwrap_or(SourceRange { start: offset, end: offset });
+        return Some(JavaScriptParseContext {
+            node_type: JavaScriptNodeType::TemplateExpression,
+            source_range: range,
+            parent_nodes: parents,
+            confidence: 0.9,
+            method: ContextMethod::Ast,
+        });
     }
 
     // Structural classification from the deepest enclosing node.
@@ -124,22 +160,15 @@ fn ast_context(source: &str, offset: usize) -> Option<JavaScriptParseContext> {
     })
 }
 
-/// The node type a literal/comment token implies, with the `${ ... }`
-/// refinement for template literals. `None` when the token is not a
-/// delimiter context (identifiers, operators, punctuation) and the AST
-/// should be consulted instead.
-fn token_node_type(tok: &Token, source: &str, offset: usize) -> Option<JavaScriptNodeType> {
+/// The node type a literal/comment token implies. `None` when the token is
+/// not a delimiter context (identifiers, operators, punctuation) and the AST
+/// should be consulted instead. Whether the token sits inside a template
+/// interpolation is decided by the caller.
+fn token_node_type(tok: &Token) -> Option<JavaScriptNodeType> {
     match tok.kind {
         TokenKind::Comment => Some(JavaScriptNodeType::Comment),
         TokenKind::String => Some(JavaScriptNodeType::String),
         TokenKind::Regex => Some(JavaScriptNodeType::RegexLiteral),
-        TokenKind::Template => {
-            if in_template_expression(source, tok.range.start, offset) {
-                Some(JavaScriptNodeType::TemplateExpression)
-            } else {
-                Some(JavaScriptNodeType::TemplateLiteral)
-            }
-        }
         _ => None,
     }
 }
@@ -196,23 +225,51 @@ fn syntax_node_type(kind: SyntaxKind) -> Option<JavaScriptNodeType> {
     }
 }
 
-/// Strictly enclosing template literals, outermost first. Templates are
-/// opaque leaves in the AST, so nesting is read from the token stream —
-/// this preserves the parent chain the old token scan produced.
+/// The head-to-tail span of every template literal, outermost first. A
+/// template opens with a head segment and closes with a tail, so the pairs
+/// are matched through a stack; unbalanced input contributes no span.
+fn template_ranges(tree: &SyntaxTree) -> Vec<SourceRange> {
+    let mut ranges = Vec::new();
+    let mut stack = Vec::new();
+    for t in &tree.tokens {
+        match t.kind {
+            TokenKind::TemplateHead => stack.push(t.range.start),
+            TokenKind::TemplateTail => {
+                if let Some(start) = stack.pop() {
+                    ranges.push(SourceRange { start, end: t.range.end });
+                }
+            }
+            _ => {}
+        }
+    }
+    ranges.sort_by_key(|r| r.start);
+    ranges
+}
+
+/// Strictly enclosing template literals, outermost first.
 fn enclosing_templates(tree: &SyntaxTree, offset: usize) -> Vec<JavaScriptNodeType> {
-    let inner = match tree.tokens.iter().find(|t| t.contains(offset)) {
-        Some(t) => t.range,
-        None => return Vec::new(),
-    };
-    tree.tokens
-        .iter()
-        .filter(|t| {
-            t.kind == TokenKind::Template
-                && t.range.start < inner.start
-                && t.range.end >= inner.end
-        })
+    template_ranges(tree)
+        .into_iter()
+        .filter(|r| r.start < offset && r.end > offset)
         .map(|_| JavaScriptNodeType::TemplateLiteral)
         .collect()
+}
+
+/// Whether `offset` sits inside a `${ ... }` interpolation: within an
+/// enclosing template, but not on one of its text segments.
+fn in_template_interpolation(tree: &SyntaxTree, offset: usize) -> bool {
+    match tree.tokens.iter().find(|t| t.contains(offset)) {
+        Some(t)
+            if matches!(
+                t.kind,
+                TokenKind::TemplateHead | TokenKind::TemplateMiddle | TokenKind::TemplateTail
+            ) =>
+        {
+            false
+        }
+        Some(_) => template_ranges(tree).iter().any(|r| r.start < offset && r.end > offset),
+        None => false,
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -237,7 +294,9 @@ fn context_tokens(source: &str) -> Vec<JsToken> {
                 TokenKind::Comment => JavaScriptNodeType::Comment,
                 TokenKind::Regex => JavaScriptNodeType::RegexLiteral,
                 TokenKind::String => JavaScriptNodeType::String,
-                TokenKind::Template => JavaScriptNodeType::TemplateLiteral,
+                TokenKind::TemplateHead | TokenKind::TemplateMiddle | TokenKind::TemplateTail => {
+                    JavaScriptNodeType::TemplateLiteral
+                }
                 TokenKind::Punct => match t.range.text(source) {
                     "{" => JavaScriptNodeType::Object,
                     "[" => JavaScriptNodeType::Array,
@@ -267,17 +326,12 @@ fn token_context(source: &str, offset: usize) -> JavaScriptParseContext {
                 parents.push(JavaScriptNodeType::TemplateLiteral);
             }
         }
-        let node_type = if tok.node_type == JavaScriptNodeType::TemplateLiteral {
-            if in_template_expression(source, tok.range.start, offset) {
-                JavaScriptNodeType::TemplateExpression
-            } else {
-                JavaScriptNodeType::TemplateLiteral
-            }
-        } else {
-            tok.node_type
-        };
+        // A context token is its own classification: a template segment is
+        // template text. An offset inside a `${ ... }` interpolation is not
+        // covered by any context token, so this fallback answers Unknown
+        // there and the AST path carries interpolation positions.
         return JavaScriptParseContext {
-            node_type,
+            node_type: tok.node_type,
             source_range: tok.range,
             parent_nodes: parents,
             confidence: 0.9,
@@ -291,30 +345,6 @@ fn token_context(source: &str, offset: usize) -> JavaScriptParseContext {
         confidence: 0.2,
         method: ContextMethod::Fallback,
     }
-}
-
-/// Whether `offset` sits inside a `${ ... }` expression within a template
-/// literal. Scans from the literal's opening backtick, tracking brace depth.
-fn in_template_expression(source: &str, literal_start: usize, offset: usize) -> bool {
-    let bytes = source.as_bytes();
-    let mut i = literal_start + 1; // skip the backtick
-    let mut depth = 0usize;
-    while i < offset.min(bytes.len()) {
-        if bytes[i] == b'\\' {
-            i += 2;
-            continue;
-        }
-        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
-            depth += 1;
-            i += 2;
-            continue;
-        }
-        if bytes[i] == b'}' && depth > 0 {
-            depth -= 1;
-        }
-        i += 1;
-    }
-    depth > 0
 }
 
 #[cfg(test)]

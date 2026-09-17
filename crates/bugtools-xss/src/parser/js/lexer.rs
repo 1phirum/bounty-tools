@@ -44,7 +44,12 @@ impl SourceRange {
 pub enum TokenKind {
     Comment,
     String,
-    Template,
+    /// A template literal's text up to and including an opening `` `${ ``.
+    TemplateHead,
+    /// Template text between one interpolation and the next: `}…${`.
+    TemplateMiddle,
+    /// Template text from the last interpolation's `}` to the closing backtick.
+    TemplateTail,
     Regex,
     Number,
     Ident,
@@ -108,8 +113,11 @@ enum Prev {
 
 fn prev_class(kind: TokenKind, text: &str) -> Prev {
     match kind {
-        TokenKind::Ident | TokenKind::Number | TokenKind::String | TokenKind::Template
+        TokenKind::Ident | TokenKind::Number | TokenKind::String | TokenKind::TemplateTail
         | TokenKind::Regex => Prev::Value,
+        // `${` opens an expression: an operand is expected next, so a `/`
+        // starts a regex rather than division.
+        TokenKind::TemplateHead | TokenKind::TemplateMiddle => Prev::Op,
         TokenKind::Keyword => {
             if is_value_keyword(text) {
                 Prev::Value
@@ -145,6 +153,20 @@ const OPS: &[&str] = &[
 /// Structural punctuation.
 const PUNCTS: &[&str] = &["{", "}", "(", ")", "[", "]", ";", ",", ".", ":", "#"];
 
+/// One open template literal, tracked so `${ … }` interpolations are lexed
+/// as real expressions rather than swallowed into one spanning token.
+#[derive(Debug, Clone, Copy)]
+struct TemplateFrame {
+    /// Start of the current text segment: the opening backtick for a head,
+    /// or the interpolation's closing `}` for a middle/tail.
+    text_start: usize,
+    /// Inside the segment's text (`true`) or inside an interpolation (`false`).
+    in_text: bool,
+    /// Brace depth while inside an interpolation: `{`/`}` of object literals
+    /// and arrow bodies, so the right `}` closes the interpolation.
+    brace: usize,
+}
+
 /// Lex `source` into a token stream with byte ranges.
 pub fn lex(source: &str) -> Vec<Token> {
     let bytes = source.as_bytes();
@@ -152,9 +174,62 @@ pub fn lex(source: &str) -> Vec<Token> {
     let mut i = 0usize;
     let len = bytes.len();
     let mut prev = Prev::None;
+    // One frame per open template, innermost last.
+    let mut templates: Vec<TemplateFrame> = Vec::new();
 
     while i < len {
         let c = bytes[i];
+
+        // Template text: the literal portion of an open template. Runs before
+        // normal tokenization so the text is one segment, not mis-tokenized
+        // words, and so `${ … }` is handed to the main loop as expressions.
+        if let Some(&frame) = templates.last() {
+            if frame.in_text {
+                let start = frame.text_start;
+                // Scan past the opening backtick (a head) or the closing
+                // brace of the previous interpolation (a middle).
+                let mut j = start + 1;
+                let mut expr_open = false;
+                let mut end = len;
+                while j < len {
+                    if bytes[j] == b'\\' {
+                        j += 2;
+                        continue;
+                    }
+                    if bytes[j] == b'$' && j + 1 < len && bytes[j + 1] == b'{' {
+                        expr_open = true;
+                        end = j + 2;
+                        break;
+                    }
+                    if bytes[j] == b'`' {
+                        end = j + 1;
+                        break;
+                    }
+                    j += 1;
+                }
+                let kind = if expr_open {
+                    // A segment starting at a backtick is the head; one
+                    // starting at a `}` is a middle.
+                    if bytes[start] == b'`' {
+                        TokenKind::TemplateHead
+                    } else {
+                        TokenKind::TemplateMiddle
+                    }
+                } else {
+                    TokenKind::TemplateTail
+                };
+                prev = emit(&mut tokens, source, kind, start, end);
+                i = end;
+                let frame = templates.last_mut().unwrap();
+                if expr_open {
+                    frame.in_text = false;
+                    frame.brace = 0;
+                } else {
+                    templates.pop();
+                }
+                continue;
+            }
+        }
 
         // Whitespace and line terminators are skipped: offsets are carried by
         // the tokens around them and the parser needs no trivia.
@@ -234,38 +309,11 @@ pub fn lex(source: &str) -> Vec<Token> {
             continue;
         }
 
-        // Template literal, kept as a single spanning token. `${ ... }`
-        // interpolations are not tokenized into expressions here: context
-        // resolution distinguishes them with a brace scan (see
-        // `javascript::in_template_expression`), and the data-flow layer can
-        // refine this later. Keeping one token preserves the exact ranges
-        // the existing offset tests assert.
+        // A backtick opens a template — including a nested one inside an
+        // interpolation. The text scan above emits its segments; `i` stays put
+        // so the scan starts at the backtick.
         if c == b'`' {
-            let start = i;
-            i += 1;
-            let mut depth = 0usize;
-            while i < len {
-                if bytes[i] == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if bytes[i] == b'$' && i + 1 < len && bytes[i + 1] == b'{' {
-                    depth += 1;
-                    i += 2;
-                    continue;
-                }
-                if bytes[i] == b'}' && depth > 0 {
-                    depth -= 1;
-                    i += 1;
-                    continue;
-                }
-                if bytes[i] == b'`' && depth == 0 {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-            prev = emit(&mut tokens, source, TokenKind::Template, start, i);
+            templates.push(TemplateFrame { text_start: i, in_text: true, brace: 0 });
             continue;
         }
 
@@ -334,6 +382,25 @@ pub fn lex(source: &str) -> Vec<Token> {
 
         // Structural punctuation.
         if let Some((kind, end)) = match_multi(bytes, i, PUNCTS, TokenKind::Punct) {
+            let text = &source[i..end];
+            // Inside a template interpolation, `{` and `}` of nested object
+            // literals and arrow bodies are tracked so the correct `}` ends
+            // the interpolation; that `}` is template syntax, not a token.
+            if let Some(frame) = templates.last_mut() {
+                if !frame.in_text {
+                    if text == "{" {
+                        frame.brace += 1;
+                    } else if text == "}" {
+                        if frame.brace == 0 {
+                            frame.in_text = true;
+                            frame.text_start = i;
+                            i = end;
+                            continue;
+                        }
+                        frame.brace -= 1;
+                    }
+                }
+            }
             prev = emit(&mut tokens, source, kind, i, end);
             i = end;
             continue;
@@ -576,15 +643,96 @@ mod tests {
         let src = r#"var x = "a ` b";"#;
         let toks = lex(src);
         assert!(toks.iter().any(|t| t.kind == TokenKind::String), "must lex a string");
-        assert!(toks.iter().all(|t| t.kind != TokenKind::Template), "no template token");
+        assert!(
+            toks.iter().all(|t| !matches!(t.kind, TokenKind::TemplateHead | TokenKind::TemplateMiddle | TokenKind::TemplateTail)),
+            "no template token"
+        );
     }
 
     #[test]
-    fn template_with_interpolation_is_one_token() {
+    fn template_without_interpolation_is_one_tail() {
+        // `` `text` `` has no `${`, so it is a lone tail covering everything.
+        let src = "var s = `text`;";
+        let toks = lex(src);
+        let t = toks
+            .iter()
+            .find(|t| matches!(t.kind, TokenKind::TemplateTail))
+            .expect("a tail must exist");
+        assert_eq!(t.range.text(src), "`text`");
+    }
+
+    #[test]
+    fn template_segments_and_interpolation_tokens() {
+        // `` `a ${ b } c` ``: head `a${`, identifier b, tail `}c` + backtick.
         let src = "var s = `a ${ b } c`;";
-        let t = token_at(src, "b");
-        assert_eq!(t.kind, TokenKind::Template);
-        assert_eq!(t.range.text(src), "`a ${ b } c`");
+        let toks: Vec<_> = lex(src)
+            .into_iter()
+            .filter(|t| !matches!(t.kind, TokenKind::Comment))
+            .collect();
+        let kinds: Vec<_> = toks.iter().map(|t| t.kind).collect();
+        assert!(kinds.contains(&TokenKind::TemplateHead), "head: {kinds:?}");
+        assert!(kinds.contains(&TokenKind::Ident), "interpolation identifier");
+        assert!(kinds.contains(&TokenKind::TemplateTail), "tail: {kinds:?}");
+        // The head covers the text up to and including `${`.
+        let head = toks.iter().find(|t| t.kind == TokenKind::TemplateHead).unwrap();
+        assert_eq!(head.range.text(src), "`a ${");
+        // The tail starts at the interpolation's closing brace.
+        let tail = toks.iter().find(|t| t.kind == TokenKind::TemplateTail).unwrap();
+        assert_eq!(tail.range.text(src), "} c`");
+    }
+
+    #[test]
+    fn template_with_two_interpolations_has_a_middle() {
+        let src = "var s = `${a} mid ${b}`;";
+        let toks = lex(src);
+        assert!(toks.iter().any(|t| t.kind == TokenKind::TemplateHead));
+        assert!(toks.iter().any(|t| t.kind == TokenKind::TemplateMiddle));
+        assert!(toks.iter().any(|t| t.kind == TokenKind::TemplateTail));
+    }
+
+    #[test]
+    fn braces_inside_an_interpolation_do_not_close_it_early() {
+        // `${ { a: 1 } }`: the object's braces are tracked, so only the final
+        // `}` ends the interpolation.
+        let src = "var s = `x ${ { a: 1 } } y`;";
+        let toks = lex(src);
+        // The interpolation's tokens are real: an object's `{`, `a`, `1`, `}`.
+        assert!(toks.iter().any(|t| t.kind == TokenKind::Ident && t.range.text(src) == "a"));
+        assert!(toks.iter().any(|t| t.kind == TokenKind::Number));
+        let tail = toks.iter().find(|t| t.kind == TokenKind::TemplateTail).unwrap();
+        assert_eq!(tail.range.text(src), "} y`");
+    }
+
+    #[test]
+    fn nested_template_inside_an_interpolation() {
+        // `${ `inner ${ x }` }`: a template opens inside an interpolation and
+        // its own interpolation is lexed too.
+        let src = "var s = `o ${ `i ${ x }` }`;";
+        let toks = lex(src);
+        let heads = toks.iter().filter(|t| t.kind == TokenKind::TemplateHead).count();
+        assert_eq!(heads, 2, "an outer and an inner head");
+        let tails = toks.iter().filter(|t| t.kind == TokenKind::TemplateTail).count();
+        assert_eq!(tails, 2, "an outer and an inner tail");
+        assert!(toks.iter().any(|t| t.kind == TokenKind::Ident && t.range.text(src) == "x"));
+    }
+
+    #[test]
+    fn escaped_interpolation_is_literal_text() {
+        // `\${` must not open an interpolation.
+        let src = r#"var s = `a \${ b`;"#;
+        let toks = lex(src);
+        assert!(toks.iter().all(|t| t.kind != TokenKind::TemplateMiddle), "no interpolation");
+        assert!(toks.iter().any(|t| t.kind == TokenKind::TemplateTail));
+    }
+
+    #[test]
+    fn template_offsets_stay_absolute() {
+        // Every segment and interpolation token keeps its true byte range.
+        let src = "var s = `a ${ b } c`;";
+        let toks = lex(src);
+        for t in &toks {
+            assert_eq!(t.range.text(src), &src[t.range.start..t.range.end]);
+        }
     }
 
     #[test]
@@ -600,8 +748,14 @@ mod tests {
     fn unterminated_input_does_not_hang_or_panic() {
         let toks = lex("var x = 'unterminated");
         assert!(toks.iter().any(|t| t.kind == TokenKind::String));
+        // An unterminated template still emits its text as one segment.
         let toks = lex("var x = `unterminated");
-        assert!(toks.iter().any(|t| t.kind == TokenKind::Template));
+        assert!(toks.iter().any(|t| t.kind == TokenKind::TemplateTail));
+        // An unterminated interpolation: the head is emitted, then the
+        // expression's own tokens follow with no tail.
+        let toks = lex("var x = `unterminated ${ a");
+        assert!(toks.iter().any(|t| t.kind == TokenKind::TemplateHead));
+        assert!(toks.iter().any(|t| t.kind == TokenKind::Ident));
         let toks = lex("var re = /unterminated");
         assert!(toks.iter().any(|t| t.kind == TokenKind::Regex));
     }

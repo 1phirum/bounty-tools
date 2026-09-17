@@ -383,15 +383,19 @@ impl<'a> Analyzer<'a> {
             | SyntaxKind::NumberLit
             | SyntaxKind::BoolLit
             | SyntaxKind::NullLit
-            | SyntaxKind::RegexLit
-            | SyntaxKind::TemplateLit => {
+            | SyntaxKind::RegexLit => {
                 if let Some(src) = self.source_within(id) {
                     return Some(TaintState::from_source(src));
                 }
-                if self.tree.node(id).kind == SyntaxKind::TemplateLit {
-                    return self.template_taint(id);
-                }
                 None
+            }
+            // `` `text ${ expr } more` ``: the interpolations are children, so
+            // a value interpolated into a template is traced like any other
+            // expression — including calls, members and sources inside `${}`.
+            // The literal text between them carries no taint.
+            SyntaxKind::TemplateLit => {
+                let children = self.tree.node(id).children.clone();
+                combine(children.into_iter().map(|c| self.eval(c)).collect())
             }
             SyntaxKind::Ident => {
                 if let Some(src) = self.source_within(id) {
@@ -529,41 +533,6 @@ impl<'a> Analyzer<'a> {
                 combine(children.into_iter().map(|c| self.eval(c)).collect())
             }
         }
-    }
-
-    /// Coarse template-interpolation taint: a template is one token, so
-    /// `${ name }` interpolations are scanned for plain identifiers and
-    /// resolved in the template's scope. Expression interpolations
-    //  (`${ v.toUpperCase() }`) are not traced â€” a documented limitation
-    /// shared with the lexer, refined in P1.4.
-    fn template_taint(&mut self, id: NodeId) -> Option<TaintState> {
-        let text = self.tree.node_text(id);
-        let scope_offset = self.tree.node(id).range.start;
-        let mut from = 0usize;
-        while let Some(rel) = text[from..].find("${") {
-            let open = from + rel;
-            let Some(close_rel) = text[open + 2..].find('}') else {
-                break;
-            };
-            let close = open + 2 + close_rel;
-            let inner = text[open + 2..close].trim();
-            if !inner.is_empty()
-                && inner
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
-            {
-                if let Some(b) = self.scopes.resolve_at(scope_offset, inner) {
-                    if let Some(st) = self.bindings.get(&(b.range.start, b.range.end)) {
-                        return Some(st.clone());
-                    }
-                }
-                if let Some(st) = self.globals.get(inner) {
-                    return Some(st.clone());
-                }
-            }
-            from = close + 1;
-        }
-        None
     }
 
     // ------------------------------------------------------------------
@@ -998,6 +967,58 @@ mod tests {
     fn template_interpolation_carries_taint() {
         let f = flows("var v = location.hash; var s = `${v}`; el.innerHTML = s;");
         assert_eq!(f.len(), 1, "a template interpolation must carry taint");
+    }
+
+    #[test]
+    fn template_interpolation_expression_carries_taint() {
+        // `${ v.toUpperCase() }`: the interpolation is a real expression now,
+        // not a scanned name, so a call inside it is traced.
+        let f = flows("var v = location.hash; var s = `${v.toUpperCase()}`; el.innerHTML = s;");
+        assert_eq!(f.len(), 1, "an expression interpolation must carry taint");
+        // And a classified transform inside the interpolation is recorded.
+        let f = flows("var v = location.hash; var s = `${v.replace('a','b')}`; el.innerHTML = s;");
+        assert_eq!(f.len(), 1);
+        assert!(f[0].transforms.iter().any(|t| t == "replace"), "transforms: {:?}", f[0].transforms);
+    }
+
+    #[test]
+    fn template_interpolation_source_read() {
+        // The source read is inside the interpolation itself.
+        let f = flows("var s = `${location.hash}`; el.innerHTML = s;");
+        assert_eq!(f.len(), 1);
+    }
+
+    #[test]
+    fn template_interpolation_member_of_tainted() {
+        let f = flows("var o = { a: location.hash }; var s = `${o.a}`; el.innerHTML = s;");
+        assert_eq!(f.len(), 1, "a member interpolation must carry taint");
+    }
+
+    #[test]
+    fn template_interpolation_sanitizer_on_path() {
+        // A sanitizer applied inside the interpolation sanitizes the flow.
+        let f = flows("var v = location.hash; var s = `${escapeHtml(v)}`; el.innerHTML = s;");
+        assert_eq!(f.len(), 1);
+        assert!(f[0].sanitized, "a sanitizer inside an interpolation must sanitize");
+    }
+
+    #[test]
+    fn template_text_without_interpolation_is_clean() {
+        let f = flows("var v = location.hash; var s = `plain text`; el.innerHTML = s;");
+        assert!(f.is_empty(), "template text alone must not carry taint: {:?}", f);
+    }
+
+    #[test]
+    fn template_interpolation_function_call_traced() {
+        // An interprocedural value inside an interpolation.
+        let f = flows("function f(x) { return x; } var s = `${f(location.hash)}`; el.innerHTML = s;");
+        assert_eq!(f.len(), 1);
+    }
+
+    #[test]
+    fn nested_template_interpolation_carries_taint() {
+        let f = flows("var v = location.hash; var s = `a ${ `b ${v}` }`; el.innerHTML = s;");
+        assert_eq!(f.len(), 1, "a nested interpolation must carry taint");
     }
 
     #[test]
