@@ -1,0 +1,38 @@
+name: ci
+
+# Build and test on every push to master and every pull request. Formatting
+# and clippy run as a separate, non-blocking job so style feedback shows up
+# without gating merges (tighten it by removing `continue-on-error` once the
+# tree is fmt/clippy clean).
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    name: build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --verbose
+      - name: Test
+        run: cargo test --workspace --verbose
+
+  lint:
+    name: fmt & clippy
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets
