@@ -87,6 +87,10 @@ impl DbmsProbeEngine {
         let timing_payloads = generators::time_based::generate();
         results.extend(self.run_payloads(base, param_name, &baseline, timing_payloads).await?);
 
+        // Phase 5b: Stacked queries (timing-confirmed capability probe)
+        let stacked_payloads = generators::stacked_queries::generate();
+        results.extend(self.run_payloads(base, param_name, &baseline, stacked_payloads).await?);
+
         // Phase 6 & 7: Boolean & Union based (Hooks for future expansion)
         let bool_payloads = generators::boolean_based::generate();
         results.extend(self.run_payloads(base, param_name, &baseline, bool_payloads).await?);

