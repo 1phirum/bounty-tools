@@ -4,6 +4,7 @@ pub mod syntax_features;
 pub mod clause_variants;
 pub mod boolean_based;
 pub mod union_based;
+pub mod oob_exfil;
 
 use crate::types::ProbeType;
 use crate::clause_map::SqlClause;

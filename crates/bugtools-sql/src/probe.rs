@@ -184,6 +184,35 @@ impl DbmsProbeEngine {
                         vec![]
                     }
                 }
+                ProbeType::ErrorInjection => {
+                    // Fingerprint/extraction probes: trust the dialect the
+                    // error text reveals (extraction probes leak it directly).
+                    detection.detected_dbms.map_or(vec![], |d| vec![d])
+                }
+                ProbeType::UnionBased => {
+                    // Strongest signal: our sentinel was reflected in the body,
+                    // meaning the injected UNION column rendered back to us.
+                    if resp.body.contains(crate::generators::union_based::SENTINEL_HEAD) {
+                        payload_def
+                            .expected_dbms
+                            .or(detection.detected_dbms)
+                            .map_or(vec![], |d| vec![d])
+                    } else {
+                        detection.detected_dbms.map_or(vec![], |d| vec![d])
+                    }
+                }
+                ProbeType::BooleanBlind => {
+                    // A FALSE predicate that changed the page (its TRUE twin
+                    // matches the baseline) shows the condition reached SQL.
+                    let diverged = body_hash != baseline.response_body_hash;
+                    if let Some(d) = detection.detected_dbms {
+                        vec![d]
+                    } else if payload_def.name.ends_with("-false") && diverged {
+                        payload_def.expected_dbms.map_or(vec![], |d| vec![d])
+                    } else {
+                        vec![]
+                    }
+                }
                 _ => vec![],
             };
 
