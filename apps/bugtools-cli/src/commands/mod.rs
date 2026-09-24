@@ -2,6 +2,7 @@
 //! arguments and returns `Result<()>`.
 
 pub mod discover;
+pub mod endpoints;
 pub mod http;
 pub mod payload;
 pub mod pipeline;

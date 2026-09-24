@@ -1,0 +1,15 @@
+[package]
+name = "bugtools-endpoints"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+regex = { workspace = true }
+scraper = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

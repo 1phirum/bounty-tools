@@ -14,6 +14,7 @@ bugtools-core = { path = "../../crates/bugtools-core" }
 bugtools-dns = { path = "../../crates/bugtools-dns" }
 bugtools-discovery = { path = "../../crates/bugtools-discovery" }
 bugtools-crawler = { path = "../../crates/bugtools-crawler" }
+bugtools-endpoints = { path = "../../crates/bugtools-endpoints" }
 bugtools-http = { path = "../../crates/bugtools-http" }
 bugtools-scope = { path = "../../crates/bugtools-scope" }
 bugtools-runtime = { path = "../../crates/bugtools-runtime" }

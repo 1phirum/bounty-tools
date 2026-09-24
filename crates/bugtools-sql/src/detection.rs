@@ -27,6 +27,16 @@ impl DbmsFamily {
         DbmsFamily::H2,
     ];
 
+    /// Stable precedence ordinal (position in `ALL`). Used only as a
+    /// deterministic tie-break when two families score equally — it does
+    /// not express any real preference between engines.
+    pub fn rank_ordinal(&self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|d| d == self)
+            .unwrap_or(usize::MAX)
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             DbmsFamily::MySQL => "MySQL",
@@ -180,13 +190,6 @@ pub const DETECTION_SIGNALS: &[DetectionSignal] = &[
         category: SignalCategory::CatalogTable,
     },
     DetectionSignal {
-        label: "PostgreSQL version function",
-        needle: "version()",
-        dbms: DbmsFamily::PostgreSQL,
-        weight: 20,
-        category: SignalCategory::FunctionPresence,
-    },
-    DetectionSignal {
         label: "PostgreSQL pg_sleep",
         needle: "pg_sleep",
         dbms: DbmsFamily::PostgreSQL,
@@ -217,8 +220,11 @@ pub const DETECTION_SIGNALS: &[DetectionSignal] = &[
         category: SignalCategory::ErrorPattern,
     },
     DetectionSignal {
+        // Canonical MSSQL message is `Incorrect syntax near 'X'.` — the older
+        // needle demanded a `Line 1: ` prefix that most responses don't carry,
+        // so genuine MSSQL errors were being missed.
         label: "MSSQL incorrect syntax near",
-        needle: "line 1: incorrect syntax near",
+        needle: "incorrect syntax near",
         dbms: DbmsFamily::MSSQL,
         weight: 40,
         category: SignalCategory::ErrorPattern,
@@ -231,15 +237,15 @@ pub const DETECTION_SIGNALS: &[DetectionSignal] = &[
         category: SignalCategory::DriverName,
     },
     DetectionSignal {
-        label: "MSSQL @@version",
+        label: "MSSQL @@version (shared with MySQL — weak)",
         needle: "@@version",
         dbms: DbmsFamily::MSSQL,
-        weight: 25,
+        weight: 12,
         category: SignalCategory::SyntaxFeature,
     },
     DetectionSignal {
-        label: "MSSQL TOP keyword",
-        needle: "top ",
+        label: "MSSQL SELECT TOP",
+        needle: "select top ",
         dbms: DbmsFamily::MSSQL,
         weight: 15,
         category: SignalCategory::SyntaxFeature,
@@ -289,10 +295,10 @@ pub const DETECTION_SIGNALS: &[DetectionSignal] = &[
         category: SignalCategory::DriverName,
     },
     DetectionSignal {
-        label: "Oracle SYS.DUAL",
-        needle: "dual",
+        label: "Oracle FROM DUAL",
+        needle: "from dual",
         dbms: DbmsFamily::Oracle,
-        weight: 20,
+        weight: 25,
         category: SignalCategory::CatalogTable,
     },
     DetectionSignal {
@@ -326,15 +332,24 @@ pub const DETECTION_SIGNALS: &[DetectionSignal] = &[
         category: SignalCategory::ErrorPattern,
     },
     DetectionSignal {
+        // "incomplete input" is a real SQLite parser error but also ordinary
+        // form-validation English, so it only corroborates — never enough on
+        // its own to name SQLite.
         label: "SQLite incomplete input",
         needle: "incomplete input",
         dbms: DbmsFamily::SQLite,
-        weight: 45,
+        weight: 25,
         category: SignalCategory::ErrorPattern,
     },
     DetectionSignal {
-        label: "SQLite syntax error near",
-        needle: "near \".*\": syntax error",
+        // SQLite reports `near "TOKEN": syntax error`. Match the literal
+        // closing-quote + `: syntax error` shape — this is a plain substring
+        // matcher, so a regex needle like `.*` would never fire. The leading
+        // quote keeps this off PostgreSQL/H2 errors, which say `error: syntax
+        // error ...` / `exception: syntax error ...` (no quote before the
+        // colon).
+        label: "SQLite quoted-token syntax error",
+        needle: "\": syntax error",
         dbms: DbmsFamily::SQLite,
         weight: 40,
         category: SignalCategory::ErrorPattern,
@@ -381,9 +396,15 @@ pub fn analyze_error_body(body: &str) -> DbmsDetectionResult {
         }
     }
 
-    // Rank DBMS by confidence, highest first.
+    // Rank DBMS by confidence, highest first. `scores` comes from a HashMap,
+    // so ties would otherwise resolve in nondeterministic iteration order and
+    // the "detected" winner could flip run-to-run on the same body. Break ties
+    // by the family's stable ordinal so the verdict is reproducible.
     let mut ranked: Vec<(DbmsFamily, u32)> = scores.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.rank_ordinal().cmp(&b.0.rank_ordinal()))
+    });
 
     let (winner, winner_confidence) = ranked
         .first()
@@ -505,5 +526,83 @@ mod tests {
         let body = "check the manual that corresponds to your MariaDB server version";
         let result = analyze_error_body(body);
         assert_eq!(result.detected_dbms, Some(DbmsFamily::MariaDB));
+    }
+
+    #[test]
+    fn sqlite_quoted_token_syntax_error_now_fires() {
+        // Regression: this needle was authored as a regex (`near ".*": syntax
+        // error`) but is matched as a literal substring, so it never fired and
+        // real SQLite syntax errors went undetected.
+        let body = "sqlite error near \"WHERE\": syntax error";
+        let result = analyze_error_body(body);
+        assert_eq!(result.detected_dbms, Some(DbmsFamily::SQLite));
+        assert!(
+            result
+                .signals
+                .iter()
+                .any(|s| s.label == "SQLite quoted-token syntax error"),
+            "the quoted-token signal must fire on a real SQLite message"
+        );
+    }
+
+    #[test]
+    fn postgres_syntax_error_is_not_misread_as_sqlite() {
+        // PostgreSQL says `ERROR: syntax error at or near "..."` — the colon is
+        // preceded by a letter, not a quote, so the SQLite needle must not fire.
+        let body = "ERROR: syntax error at or near \"'\"";
+        let result = analyze_error_body(body);
+        assert_eq!(result.detected_dbms, Some(DbmsFamily::PostgreSQL));
+    }
+
+    #[test]
+    fn plain_english_top_and_dual_do_not_false_positive() {
+        // Ordinary page copy used to score Oracle ("dual") and MSSQL ("top ").
+        let body = "<html><body>This dual-core laptop scrolls back to top of the page.</body></html>";
+        let result = analyze_error_body(body);
+        assert_eq!(result.detected_dbms, None, "no DBMS should be inferred from prose");
+    }
+
+    #[test]
+    fn precise_oracle_and_mssql_syntax_still_fire() {
+        assert_eq!(
+            analyze_error_body("SELECT banner FROM dual").detected_dbms,
+            Some(DbmsFamily::Oracle)
+        );
+        assert_eq!(
+            analyze_error_body("query was: SELECT TOP 1 name FROM users").detected_dbms,
+            Some(DbmsFamily::MSSQL)
+        );
+    }
+
+    #[test]
+    fn information_schema_alone_does_not_implicate_h2() {
+        // INFORMATION_SCHEMA is ANSI-standard and shared across engines.
+        let body = "SELECT * FROM information_schema.tables";
+        let result = analyze_error_body(body);
+        assert_ne!(result.detected_dbms, Some(DbmsFamily::H2));
+    }
+
+    #[test]
+    fn mssql_incorrect_syntax_without_line_prefix_detects() {
+        // Most MSSQL responses carry `Incorrect syntax near 'X'.` with no
+        // `Line 1:` prefix; the signal must still fire.
+        let body = "Incorrect syntax near 'FROM'.";
+        let result = analyze_error_body(body);
+        assert_eq!(result.detected_dbms, Some(DbmsFamily::MSSQL));
+    }
+
+    #[test]
+    fn ranking_ties_break_deterministically() {
+        // Two families scoring exactly 45 each (Oracle ORA-00907 vs. the MSSQL
+        // ODBC driver banner). The tie must resolve to the same winner every
+        // time, not flip with HashMap iteration order. MSSQL precedes Oracle in
+        // `DbmsFamily::ALL`, so it wins by ordinal.
+        let body = "ORA-00907: missing right parenthesis [Driver][SQL Server]";
+        let result = analyze_error_body(body);
+        assert_eq!(result.confidence, 45);
+        assert_eq!(result.detected_dbms, Some(DbmsFamily::MSSQL));
+        for _ in 0..64 {
+            assert_eq!(analyze_error_body(body).detected_dbms, Some(DbmsFamily::MSSQL));
+        }
     }
 }

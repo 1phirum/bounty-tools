@@ -15,6 +15,7 @@ members = [
     "crates/bugtools-dns",
     "crates/bugtools-discovery",
     "crates/bugtools-crawler",
+    "crates/bugtools-endpoints",
     "crates/bugtools-output",
     "crates/bugtools-runtime",
 ]

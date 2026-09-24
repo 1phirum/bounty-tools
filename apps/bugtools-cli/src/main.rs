@@ -143,5 +143,43 @@ async fn main() -> Result<()> {
             };
             commands::sqli::run(&input, i_authorize, opts).await
         }
+
+        Commands::Endpoints {
+            input,
+            i_authorize,
+            base,
+            profile,
+            depth,
+            include_external,
+            no_assets,
+            kind,
+            cookies,
+            headers,
+            bearer,
+            rate_limit,
+            max_requests,
+            program,
+            handle,
+            json,
+        } => {
+            let opts = commands::endpoints::EndpointsOptions {
+                i_authorize,
+                base: base.as_deref(),
+                profile: &profile,
+                depth,
+                include_external,
+                include_assets: !no_assets,
+                kind: kind.as_deref(),
+                cookies: &cookies,
+                headers: &headers,
+                bearer: bearer.as_deref(),
+                rate_limit,
+                max_requests,
+                program: program.as_deref(),
+                handle: handle.as_deref(),
+                json,
+            };
+            commands::endpoints::run(&input, opts).await
+        }
     }
 }

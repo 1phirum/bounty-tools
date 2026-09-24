@@ -31,13 +31,10 @@ pub const DB2_SIGNALS: &[DetectionSignal] = &[
         weight: 35,
         category: SignalCategory::CatalogTable,
     },
-    DetectionSignal {
-        label: "DB2 fetch-first syntax",
-        needle: "fetch first",
-        dbms: crate::detection::DbmsFamily::DB2,
-        weight: 20,
-        category: SignalCategory::SyntaxFeature,
-    },
+    // NOTE: `fetch first` is deliberately NOT a DB2 signal. `FETCH FIRST n ROWS`
+    // is SQL:2008 standard, supported by Oracle 12c+, PostgreSQL, and MSSQL
+    // 2012+, so it misattributes those engines to DB2. DB2 is already named by
+    // its SQL error code, CLI driver, and SYSIBM catalog above.
 ];
 
 /// Additional H2 (Java embedded database) signatures.
@@ -63,13 +60,10 @@ pub const H2_SIGNALS: &[DetectionSignal] = &[
         weight: 40,
         category: SignalCategory::ErrorPattern,
     },
-    DetectionSignal {
-        label: "H2 INFORMATION_SCHEMA",
-        needle: "information_schema",
-        dbms: crate::detection::DbmsFamily::H2,
-        weight: 15,
-        category: SignalCategory::CatalogTable,
-    },
+    // NOTE: `information_schema` is deliberately NOT an H2 signal. It is an
+    // ANSI-standard catalog present in MySQL/MariaDB/PostgreSQL/MSSQL/H2, so
+    // it cannot discriminate H2 from anything else and only created false
+    // positives. H2 is already identified by its driver + error patterns above.
 ];
 
 #[cfg(test)]

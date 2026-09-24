@@ -215,6 +215,59 @@ pub enum Commands {
         #[arg(long)]
         handle: Option<String>,
     },
+    /// Discover endpoints from a page/bundle (offline) or a live URL.
+    #[command(visible_alias = "e", long_about = "Endpoint discovery. Runs the composable extractor engine (HTML DOM, JavaScript request calls, and a path heuristic) over content and reports classified, route-templated endpoints with a confidence that reflects how many independent sources corroborate each one.\n\nOFFLINE (default): read a saved response/bundle from a file or stdin.\nLIVE (--i-authorize): fetch the URL through the scope-checked, rate-limited safe client, then dynamically follow the page's same-host scripts up to --depth and extract from those too.\n\nThe --profile flag sets a realistic browser header set (User-Agent, Accept, Sec-CH-UA) as defaults so an authorized scan presents as an ordinary client and is not trivially rejected. It sends a static, honest profile only: it does NOT spoof origin IPs, rotate headers, or attempt to defeat WAF/bot-management challenges.\n\nEXAMPLES:\n  bugtools e app.html --base https://target/\n  bugtools e - < bundle.js\n  bugtools e https://target/ --i-authorize\n  bugtools e https://target/ --i-authorize --depth 2 --profile chrome --json\n  bugtools e https://target/ --i-authorize --kind api --no-assets")]
+    Endpoints {
+        /// A file path, "-" for stdin, or (with --i-authorize) a URL to fetch.
+        input: String,
+        /// Authorize a live fetch of the URL and its same-host scripts.
+        /// Without it, `input` is read as a file or from stdin.
+        #[arg(short = 'y', long)]
+        i_authorize: bool,
+        /// Base URL to resolve relative references against (offline mode).
+        /// In live mode the fetched URL is the base.
+        #[arg(long)]
+        base: Option<String>,
+        /// Browser header profile for live requests: chrome, safari, api, none.
+        #[arg(long, default_value = "chrome")]
+        profile: String,
+        /// Dynamic depth: also fetch same-host scripts found, this many levels.
+        #[arg(long, default_value_t = 1)]
+        depth: u32,
+        /// Keep references that point at a host other than the base's.
+        #[arg(long)]
+        include_external: bool,
+        /// Drop static-asset endpoints from the output.
+        #[arg(long)]
+        no_assets: bool,
+        /// Show only endpoints of this kind: page, api, asset, form, websocket.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Cookies (inline list or file path).
+        #[arg(short = 'c', long = "cookie", value_delimiter = ';')]
+        cookies: Vec<String>,
+        /// Extra headers as `Name: value`. Override profile defaults.
+        #[arg(short = 'H', long = "header")]
+        headers: Vec<String>,
+        /// Bearer token.
+        #[arg(short = 'b', long)]
+        bearer: Option<String>,
+        /// Requests per second for live fetching.
+        #[arg(long, default_value_t = 5.0)]
+        rate_limit: f64,
+        /// Maximum requests to spend across a live run.
+        #[arg(long, default_value_t = 50)]
+        max_requests: u64,
+        /// Path to a program policy TOML file. Enforces its scope and limits.
+        #[arg(long, value_name = "FILE")]
+        program: Option<String>,
+        /// Your researcher handle; sent as an identity header when supplied.
+        #[arg(long)]
+        handle: Option<String>,
+        /// Emit JSON instead of a human-readable table.
+        #[arg(short = 'j', long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
