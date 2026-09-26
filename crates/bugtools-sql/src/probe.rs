@@ -46,11 +46,42 @@ impl DbmsProbeEngine {
     }
 
     /// Run the full detection pipeline against a parameterized endpoint.
+    ///
+    /// This is the single-URL `analyze` path: the whole catalogue, once. The
+    /// batch scanner shares it through [`DbmsProbeEngine::sweep`].
     pub async fn detect(
         &self,
         base: &HttpRequest,
         param_name: &str,
         _param_value: &str,
+    ) -> Result<Vec<ProbeResult>, ProbeError> {
+        let catalog = generators::catalog();
+        // Diagnostics go to stderr: stdout carries structured results (a JSON
+        // document under `--json`), and a progress line printed there would
+        // make the output unparseable.
+        eprintln!(
+            "[*] catalogue: {} payload(s) across {} technique(s)",
+            catalog.len(),
+            generators::catalog_summary()
+                .iter()
+                .filter(|(_, n)| *n > 0)
+                .count()
+        );
+        self.sweep(base, param_name, catalog).await
+    }
+
+    /// Run a caller-supplied payload catalogue against the endpoint.
+    ///
+    /// This is the shared engine: `detect` calls it with the full catalogue,
+    /// while the batch scanner (`sqli`) calls it with a tier-gated, tampered
+    /// subset. Both therefore execute through the same signal attribution —
+    /// timing deltas, sentinel reflection, boolean divergence — instead of two
+    /// implementations that drift apart.
+    pub async fn sweep(
+        &self,
+        base: &HttpRequest,
+        param_name: &str,
+        payloads: Vec<GeneratedPayload>,
     ) -> Result<Vec<ProbeResult>, ProbeError> {
         let mut results = Vec::new();
 
@@ -60,43 +91,18 @@ impl DbmsProbeEngine {
 
         // Phase 1b: WAF Classification on Baseline
         let waf_obs = classifier::classify_origin(&raw_resp);
-        
         let reachability = OriginReachabilityEngine::assess(&waf_obs, &raw_resp);
         println!("Baseline Reachability: {:?}", reachability.state);
-
-        if waf_obs.origin == ResponseOrigin::CloudflareWaf || waf_obs.origin == ResponseOrigin::CloudflareChallenge || waf_obs.origin == ResponseOrigin::CloudflareRateLimit {
-            // Stage 1 Leap: Don't abort here. We log/track it, but continue to allow
-            // the control planner (built in Stage 2) to perform attribution.
-            // For now, we will just add a detection signal.
-            println!("Baseline intercepted by WAF: {:?}", waf_obs.action);
+        if waf_obs.origin == ResponseOrigin::CloudflareWaf
+            || waf_obs.origin == ResponseOrigin::CloudflareChallenge
+            || waf_obs.origin == ResponseOrigin::CloudflareRateLimit
+        {
+            // Do not abort: the response is recorded so nothing downstream can
+            // mistake an edge block for SQL evidence.
+            eprintln!("[!] baseline intercepted by WAF: {:?}", waf_obs.action);
         }
 
-        // Phase 2: Error injection
-        let error_payloads = generators::error_based::generate();
-        results.extend(self.run_payloads(base, param_name, &baseline, error_payloads).await?);
-
-        // Phase 3: Syntax features
-        let syntax_payloads = generators::syntax_features::generate();
-        results.extend(self.run_payloads(base, param_name, &baseline, syntax_payloads).await?);
-
-        // Phase 4: Clause variants
-        let clause_payloads = generators::clause_variants::generate();
-        results.extend(self.run_payloads(base, param_name, &baseline, clause_payloads).await?);
-
-        // Phase 5: Timing based
-        let timing_payloads = generators::time_based::generate();
-        results.extend(self.run_payloads(base, param_name, &baseline, timing_payloads).await?);
-
-        // Phase 5b: Stacked queries (timing-confirmed capability probe)
-        let stacked_payloads = generators::stacked_queries::generate();
-        results.extend(self.run_payloads(base, param_name, &baseline, stacked_payloads).await?);
-
-        // Phase 6 & 7: Boolean & Union based (Hooks for future expansion)
-        let bool_payloads = generators::boolean_based::generate();
-        results.extend(self.run_payloads(base, param_name, &baseline, bool_payloads).await?);
-        
-        let union_payloads = generators::union_based::generate();
-        results.extend(self.run_payloads(base, param_name, &baseline, union_payloads).await?);
+        results.extend(self.run_payloads(base, param_name, &baseline, payloads).await?);
 
         Ok(results)
     }

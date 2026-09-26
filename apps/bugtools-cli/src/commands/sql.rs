@@ -4,7 +4,18 @@ use anyhow::Result;
 use bugtools_sql::DbmsFamily;
 
 use crate::cli::SqlCommands;
-use crate::parsing::parse_dbms_arg;
+use crate::parsing::{apply_identity_header, parse_dbms_arg, resolve_cookies, resolve_headers};
+
+/// Options for the live `analyze` probe path.
+struct AnalyzeOptions<'a> {
+    param: Option<&'a str>,
+    cookies: &'a [String],
+    cookie_file: Option<&'a str>,
+    headers: &'a [String],
+    bearer: Option<&'a str>,
+    handle: Option<&'a str>,
+    json: bool,
+}
 
 pub async fn run(command: SqlCommands) -> Result<()> {
     match command {
@@ -14,7 +25,24 @@ pub async fn run(command: SqlCommands) -> Result<()> {
             url,
             param,
             i_authorize,
-        } => analyze(&url, param.as_deref(), i_authorize).await,
+            cookies,
+            cookie_file,
+            headers,
+            bearer,
+            handle,
+            json,
+        } => {
+            let opts = AnalyzeOptions {
+                param: param.as_deref(),
+                cookies: &cookies,
+                cookie_file: cookie_file.as_deref(),
+                headers: &headers,
+                bearer: bearer.as_deref(),
+                handle: handle.as_deref(),
+                json,
+            };
+            analyze(&url, i_authorize, opts).await
+        }
     }
 }
 
@@ -29,7 +57,7 @@ async fn detect(text: &str) -> Result<()> {
         text.to_string()
     };
 
-    let result = bugtools_sql::detection::analyze_error_body(&input);
+    let result = bugtools_sql::detection::analyze_error_body(crate::parsing::strip_bom(&input));
     match result.detected_dbms {
         Some(dbms) => {
             println!("DBMS:       {}", dbms.display_name());
@@ -93,7 +121,7 @@ fn clauses(dbms: Option<&str>) -> Result<()> {
 }
 
 /// Live scope-checked DBMS detection against a parameterized URL.
-async fn analyze(url: &str, param: Option<&str>, authorize: bool) -> Result<()> {
+async fn analyze(url: &str, authorize: bool, opts: AnalyzeOptions<'_>) -> Result<()> {
     if !authorize {
         anyhow::bail!(
             "refusing to send probes without --i-authorize.\n\
@@ -115,10 +143,35 @@ async fn analyze(url: &str, param: Option<&str>, authorize: bool) -> Result<()> 
             host.to_string(),
         ));
     }
-    println!("[*] authorized host: {}", parsed.host_str().unwrap_or(""));
+
+    // Resolve the request identity: headers + bearer, cookies, and an optional
+    // researcher handle folded into X-Bug-Bounty. These ride on every probe so
+    // program-compliance headers actually reach the target.
+    let mut header_map = resolve_headers(opts.headers, opts.bearer)?;
+    let cookies = resolve_cookies(opts.cookies, opts.cookie_file)?;
+    if !cookies.is_empty() {
+        let cookie_value = cookies
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        header_map.insert("Cookie".to_string(), cookie_value);
+    }
+    if let Some(handle) = opts.handle {
+        apply_identity_header(&mut header_map, handle);
+    }
+
+    if !opts.json {
+        println!("[*] authorized host: {}", parsed.host_str().unwrap_or(""));
+        if !header_map.is_empty() {
+            let mut names: Vec<&str> = header_map.keys().map(String::as_str).collect();
+            names.sort_unstable();
+            println!("[*] request headers: {}", names.join(", "));
+        }
+    }
 
     // Default parameter: the first query key.
-    let (param_name, param_value) = match param {
+    let (param_name, param_value) = match opts.param {
         Some(p) => {
             let v = parsed
                 .query_pairs()
@@ -132,7 +185,9 @@ async fn analyze(url: &str, param: Option<&str>, authorize: bool) -> Result<()> 
             None => anyhow::bail!("URL has no query parameter to probe"),
         },
     };
-    println!("[*] probing parameter: {param_name}");
+    if !opts.json {
+        println!("[*] probing parameter: {param_name}");
+    }
 
     use bugtools_core::http::HttpRequest;
     use chrono::Utc;
@@ -141,13 +196,18 @@ async fn analyze(url: &str, param: Option<&str>, authorize: bool) -> Result<()> 
         job_id: None,
         url: url.to_string(),
         method: "GET".into(),
-        headers: Default::default(),
+        headers: header_map,
         body: None,
         timestamp: Utc::now(),
     };
 
     let engine = bugtools_sql::DbmsProbeEngine::new(scope.clone());
     let result = bugtools_sql::analyze_endpoint(&engine, &base, &param_name, &param_value).await?;
+
+    if opts.json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
 
     println!("\nDBMS hypothesis: {}", match &result.dbms_hypothesis {
         Some(d) => d.display_name(),

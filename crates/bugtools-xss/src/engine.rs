@@ -37,8 +37,10 @@ pub struct AnalyzeRequest {
 /// Pipeline: technology -> rendering model -> reflection -> context ->
 /// source/sink taint -> exploitability -> confidence -> assessment.
 pub fn analyze(req: &AnalyzeRequest) -> XssAssessment {
-    // 1. Technology fingerprint from the response.
-    let observations = observations_from_response(&req.headers, &req.body, &[]);
+    // 1. Technology fingerprint from the response. Script `src` URLs are
+    //    extracted so CDN/bundle version strings (e.g. jquery/3.4.1) are seen.
+    let script_srcs = crate::technology::extract_script_srcs(&req.body);
+    let observations = observations_from_response(&req.headers, &req.body, &script_srcs);
     let findings = detect(&observations);
 
     // 2. Strategy and rendering model.
@@ -114,8 +116,12 @@ pub fn analyze(req: &AnalyzeRequest) -> XssAssessment {
         }
 
         // Sink reachability from the taint graph on the page's scripts.
+        // Both caller-supplied external scripts and inline <script> blocks in
+        // the body are analysed, so a DOM-XSS flow in page script is caught.
+        let mut scripts: Vec<String> = req.script_sources.clone();
+        scripts.extend(crate::technology::extract_inline_scripts(&req.body));
         let mut saw_sink = false;
-        for script in &req.script_sources {
+        for script in &scripts {
             let graph = build_graph(script);
             let critical = graph.unsanitized_critical_flows();
             if !critical.is_empty() {

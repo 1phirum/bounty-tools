@@ -13,6 +13,40 @@ pub enum DbmsFamily {
     SQLite,
     DB2,
     H2,
+    // ── sqlmap-parity engine families ─────────────────────────────────────
+    // sqlmap ships error-based vectors for 17 engines and timing vectors for
+    // 13; the eight above covered about two thirds of that. These close the
+    // gap, plus five engines sqlmap does not name at all.
+    /// Sybase Adaptive Server Enterprise (T-SQL heritage, distinct driver).
+    Sybase,
+    /// Firebird / InterBase.
+    Firebird,
+    /// IBM Informix Dynamic Server.
+    Informix,
+    /// HSQLDB (HyperSQL) — common beside H2 in Java embedded stacks.
+    HSQLDB,
+    /// SAP MaxDB (formerly SAP DB).
+    MaxDB,
+    /// SAP HANA.
+    SAPHANA,
+    /// ClickHouse (OLAP).
+    ClickHouse,
+    /// CUBRID.
+    Cubrid,
+    /// OpenLink Virtuoso.
+    Virtuoso,
+    /// MonetDB (column store).
+    MonetDB,
+    /// Vertica (column store).
+    Vertica,
+    /// InterSystems Cache (SQL gateway).
+    Cache,
+    /// Presto / Trino (federated SQL).
+    Presto,
+    /// Google Cloud Spanner.
+    Spanner,
+    /// Microsoft Access / Jet.
+    Access,
 }
 
 impl DbmsFamily {
@@ -25,6 +59,21 @@ impl DbmsFamily {
         DbmsFamily::SQLite,
         DbmsFamily::DB2,
         DbmsFamily::H2,
+        DbmsFamily::Sybase,
+        DbmsFamily::Firebird,
+        DbmsFamily::Informix,
+        DbmsFamily::HSQLDB,
+        DbmsFamily::MaxDB,
+        DbmsFamily::SAPHANA,
+        DbmsFamily::ClickHouse,
+        DbmsFamily::Cubrid,
+        DbmsFamily::Virtuoso,
+        DbmsFamily::MonetDB,
+        DbmsFamily::Vertica,
+        DbmsFamily::Cache,
+        DbmsFamily::Presto,
+        DbmsFamily::Spanner,
+        DbmsFamily::Access,
     ];
 
     /// Stable precedence ordinal (position in `ALL`). Used only as a
@@ -47,6 +96,24 @@ impl DbmsFamily {
             DbmsFamily::SQLite => "SQLite",
             DbmsFamily::DB2 => "IBM Db2",
             DbmsFamily::H2 => "H2 Database",
+            // Engine families added for sqlmap-parity coverage (2026-09-25).
+            // They are appended after the original eight so every existing
+            // `rank_ordinal` tie-break keeps its historical winner.
+            DbmsFamily::Sybase => "Sybase Adaptive Server Enterprise",
+            DbmsFamily::Firebird => "Firebird",
+            DbmsFamily::Informix => "IBM Informix",
+            DbmsFamily::HSQLDB => "HSQLDB",
+            DbmsFamily::MaxDB => "SAP MaxDB",
+            DbmsFamily::SAPHANA => "SAP HANA",
+            DbmsFamily::ClickHouse => "ClickHouse",
+            DbmsFamily::Cubrid => "CUBRID",
+            DbmsFamily::Virtuoso => "OpenLink Virtuoso",
+            DbmsFamily::MonetDB => "MonetDB",
+            DbmsFamily::Vertica => "Vertica",
+            DbmsFamily::Cache => "InterSystems Cache",
+            DbmsFamily::Presto => "Presto / Trino",
+            DbmsFamily::Spanner => "Google Cloud Spanner",
+            DbmsFamily::Access => "Microsoft Access",
         }
     }
 
@@ -382,6 +449,24 @@ pub fn analyze_error_body(body: &str) -> DbmsDetectionResult {
         .iter()
         .chain(crate::dbms_ext::DB2_SIGNALS.iter())
         .chain(crate::dbms_ext::H2_SIGNALS.iter())
+        // sqlmap-parity engine families. Each const holds real fingerprints
+        // (driver banners, error phrasing, system catalogues), so a family is
+        // only ever named on its own evidence — see `dbms_signals_ext`.
+        .chain(crate::dbms_signals_ext::SYBASE_SIGNALS.iter())
+        .chain(crate::dbms_signals_ext::FIREBIRD_SIGNALS.iter())
+        .chain(crate::dbms_signals_ext::INFORMIX_SIGNALS.iter())
+        .chain(crate::dbms_signals_ext::HSQLDB_SIGNALS.iter())
+        .chain(crate::dbms_signals_ext::MAXDB_SIGNALS.iter())
+        .chain(crate::dbms_signals_ext::SAPHANA_SIGNALS.iter())
+        .chain(crate::dbms_signals_ext::CLICKHOUSE_SIGNALS.iter())
+        .chain(crate::dbms_signals_ext::CUBRID_SIGNALS.iter())
+        .chain(crate::dbms_signals_ext::VIRTUOSO_SIGNALS.iter())
+        .chain(crate::dbms_signals_ext::MONETDB_SIGNALS.iter())
+        .chain(crate::dbms_signals_ext::VERTICA_SIGNALS.iter())
+        .chain(crate::dbms_signals_ext::CACHE_SIGNALS.iter())
+        .chain(crate::dbms_signals_ext::PRESTO_SIGNALS.iter())
+        .chain(crate::dbms_signals_ext::SPANNER_SIGNALS.iter())
+        .chain(crate::dbms_signals_ext::ACCESS_SIGNALS.iter())
     {
         if lower.contains(signal.needle) {
             let score = scores.entry(signal.dbms).or_insert(0);

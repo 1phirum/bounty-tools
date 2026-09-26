@@ -5,6 +5,8 @@
 
 mod cli;
 mod commands;
+mod embed;
+mod engine_host;
 mod output;
 mod parsing;
 
@@ -32,6 +34,28 @@ async fn main() -> Result<()> {
 
         Commands::Resolve { hostname, types } => commands::resolve::run(&hostname, &types).await,
 
+        Commands::Recon {
+            target,
+            json,
+            quiet,
+            engine,
+            no_tls,
+            no_http,
+            timeout,
+            overall_timeout,
+        } => {
+            let opts = commands::recon::ReconOptions {
+                json,
+                quiet,
+                engine: engine.as_deref(),
+                no_tls,
+                no_http,
+                timeout,
+                overall_timeout,
+            };
+            commands::recon::run(&target, opts).await
+        }
+
         Commands::Pipeline {
             input,
             out,
@@ -41,6 +65,8 @@ async fn main() -> Result<()> {
         } => commands::pipeline::run(&input, out.as_deref(), depth, max_urls, rps).await,
 
         Commands::Sql { command } => commands::sql::run(command).await,
+
+        Commands::Nosql { command } => commands::nosql::run(command).await,
 
         Commands::Tech {
             url,
@@ -100,6 +126,9 @@ async fn main() -> Result<()> {
             tier,
             technique,
             waf,
+            tamper,
+            list_tampers,
+            catalogue,
             json,
         } => {
             commands::payload::run(
@@ -110,6 +139,9 @@ async fn main() -> Result<()> {
                 &tier,
                 &technique,
                 waf,
+                tamper.as_deref(),
+                list_tampers,
+                catalogue,
                 json,
             )
         }
@@ -127,6 +159,20 @@ async fn main() -> Result<()> {
             max_requests,
             program,
             handle,
+            dbms,
+            tamper,
+            techniques,
+            no_prove,
+            dump,
+            dump_table,
+            max_rows,
+            oob,
+            oob_provider,
+            oob_domain,
+            oob_poll,
+            oob_interactsh_server,
+            oob_token,
+            oob_wait,
             ..
         } => {
             let opts = SqliOptions {
@@ -140,6 +186,20 @@ async fn main() -> Result<()> {
                 max_requests,
                 program: program.as_deref(),
                 handle: handle.as_deref(),
+                dbms: dbms.as_deref(),
+                tamper: tamper.as_deref(),
+                techniques: &techniques,
+                prove: !no_prove,
+                dump,
+                dump_table: dump_table.as_deref(),
+                max_rows,
+                oob,
+                oob_provider: &oob_provider,
+                oob_domain: oob_domain.as_deref(),
+                oob_poll: oob_poll.as_deref(),
+                oob_interactsh_server: oob_interactsh_server.as_deref(),
+                oob_token: oob_token.as_deref(),
+                oob_wait,
             };
             commands::sqli::run(&input, i_authorize, opts).await
         }

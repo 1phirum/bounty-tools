@@ -47,7 +47,8 @@ pub use parser::{
 };
 pub use strategy::{build_strategy, RenderingModel, StrategyItem, XssStrategy};
 pub use technology::{
-    detect, observations_from_response, TechnologyEvidence, TechnologyFinding, TechCategory,
+    detect, observations_from_response, KnownWeakness, TechnologyEvidence, TechnologyFinding,
+    TechCategory, WeaknessClass,
 };
 pub use verification::{
     BrowserVerifier, BrowserEnvironment, ExecutionEvidence, ExecutionEvidenceKind, ExecutionMarker,

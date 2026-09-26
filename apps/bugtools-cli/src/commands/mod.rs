@@ -4,8 +4,10 @@
 pub mod discover;
 pub mod endpoints;
 pub mod http;
+pub mod nosql;
 pub mod payload;
 pub mod pipeline;
+pub mod recon;
 pub mod resolve;
 pub mod sql;
 pub mod sqli;

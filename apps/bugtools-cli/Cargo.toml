@@ -20,6 +20,7 @@ bugtools-scope = { path = "../../crates/bugtools-scope" }
 bugtools-runtime = { path = "../../crates/bugtools-runtime" }
 bugtools-output = { path = "../../crates/bugtools-output" }
 bugtools-sql = { path = "../../crates/bugtools-sql" }
+bugtools-nosql = { path = "../../crates/bugtools-nosql" }
 bugtools-xss = { path = "../../crates/bugtools-xss" }
 clap = { workspace = true }
 tokio = { workspace = true }

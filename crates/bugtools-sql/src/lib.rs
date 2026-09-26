@@ -1,5 +1,9 @@
 pub mod clause_map;
 pub mod detection;
+/// Typed per-engine profiles (payload composition's factual layer).
+pub mod dialects;
+/// Detection signatures for the sqlmap-parity engine families.
+pub mod dbms_signals_ext;
 pub mod probe;
 pub mod types;
 pub mod rules;
@@ -46,6 +50,12 @@ pub mod safety;
 pub mod adaptive;
 pub mod adaptive_run;
 
+// Read-only data-extraction / impact-demonstration engine (sqlmap `getValue`
+// parity): once an injection is corroborated, recover a real value through the
+// confirmed channel (UNION → error → boolean-blind → time-blind), escalating
+// from a proof set up to opt-in, row-capped table dumping. All read-only.
+pub mod extract;
+
 pub use clause_map::ClauseVariant;
 pub use detection::{DbmsFamily, DetectionVerdict, FiredSignal, SignalCategory};
 pub use probe::{DbmsProbeEngine, ProbeError};
@@ -54,12 +64,19 @@ pub use rules::{SqlDetectionRule, SqlRuleRegistry, SqlEngineError};
 pub use assessment::{AssessmentBuilder, AssessmentError, Limitation, LimitationCategory, Repeatability, SqlInjectionAssessment};
 pub use false_positive::{run_checks, ContradictionKind, FalsePositiveReport, FalsePositiveSignals};
 pub use hypothesis::{ContextHypothesis, HypothesisEvidence, QueryPosition};
-pub use oob::{InteractionType, OobCorrelation, OobCorrelator, OobInteraction, OobToken};
+pub use oob::{
+    ByocProvider, InteractionType, InteractshProvider, OobCorrelation, OobCorrelator, OobError,
+    OobInteraction, OobProvider, OobResult, OobToken, PollSource,
+};
 pub use second_order::{SecondOrderTrace, StorageContext, TraceId, TraceRegistry};
 pub use payload::{Boundary, GenerationContext, PayloadCandidate, QuoteMode};
 pub use safety::{SafetyLevel, SafetyPolicy, SafetyVerdict};
 pub use policy::{PolicyError, ProgramPolicy};
-pub use adaptive_run::{run_adaptive, AdaptiveConfig, AdaptiveResult};
+pub use adaptive_run::{run_adaptive, AdaptiveConfig, AdaptiveResult, OobRun, SweepSummary};
+pub use extract::{
+    ConfirmedInjection, ExtractedFact, ExtractedValue, ExtractionChannel, ExtractionSession,
+    DumpSpec,
+};
 
 /// Run the full SQL analysis pipeline: DBMS detection + clause mapping.
 ///

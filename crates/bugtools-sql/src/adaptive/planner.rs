@@ -24,6 +24,19 @@ pub enum CoverageState {
     Repeated,
     Confirmed,
     Inconclusive,
+    /// A battery of techniques executed against a stable baseline and none
+    /// produced a repeated differential, but the strict boolean-pair condition
+    /// for NOT_SQL_INTERPRETED was not fully met (e.g. the pair was starved by
+    /// the experiment budget, or only error/timing/union channels ran). This is
+    /// an honest "tested clean on the channels exercised" — distinct from
+    /// INCONCLUSIVE (undermined by baseline instability or partial coverage)
+    /// and from BASELINED (nothing was tested at all).
+    TestedClean,
+    /// Both AlwaysTrue and AlwaysFalse boolean tests executed against a stable
+    /// baseline without diverging — positive evidence the parameter is not
+    /// evaluated in a SQL boolean context. A negative finding, not proof of
+    /// safety against every technique.
+    NotSqlInterpreted,
     Blocked,
     Exhausted,
 }
@@ -41,6 +54,8 @@ impl CoverageState {
             Self::Repeated => "REPEATED",
             Self::Confirmed => "CONFIRMED",
             Self::Inconclusive => "INCONCLUSIVE",
+            Self::TestedClean => "TESTED_CLEAN",
+            Self::NotSqlInterpreted => "NOT_SQL_INTERPRETED",
             Self::Blocked => "BLOCKED",
             Self::Exhausted => "EXHAUSTED",
         }
@@ -440,6 +455,16 @@ mod tests {
         assert!(!CoverageState::Confirmed.should_continue());
         assert!(!CoverageState::Exhausted.should_continue());
         assert!(!CoverageState::Blocked.should_continue());
+    }
+
+    #[test]
+    fn negative_verdicts_are_terminal_and_labelled() {
+        // The two honest negatives are distinct, terminal states — neither
+        // should keep spending requests, and each carries its own label.
+        assert!(!CoverageState::TestedClean.should_continue());
+        assert!(!CoverageState::NotSqlInterpreted.should_continue());
+        assert_eq!(CoverageState::TestedClean.label(), "TESTED_CLEAN");
+        assert_eq!(CoverageState::NotSqlInterpreted.label(), "NOT_SQL_INTERPRETED");
     }
 
     #[test]

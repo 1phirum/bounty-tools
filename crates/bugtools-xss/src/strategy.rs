@@ -104,6 +104,21 @@ pub fn build_strategy(findings: &[TechnologyFinding]) -> XssStrategy {
                     priority: 0.6,
                 });
             }
+            // AngularJS 1.x is CSTI-prone in a way Angular 2+ is not: any user
+            // input that reaches a `{{ }}` interpolation context is evaluated.
+            "AngularJS" => {
+                rendering_model = RenderingModel::ClientSideSpa;
+                items.push(StrategyItem {
+                    focus: "client-side template injection in {{ }} interpolation".into(),
+                    rationale: "AngularJS evaluates expressions; input reaching an interpolation context is CSTI, not just reflected text".into(),
+                    priority: 0.95,
+                });
+                items.push(StrategyItem {
+                    focus: "ng-app scope: locate an interpolated reflection".into(),
+                    rationale: "CSTI only fires inside the ng-app root; confirm the reflection sits within it".into(),
+                    priority: 0.7,
+                });
+            }
             "Vue.js" | "Nuxt.js" => {
                 rendering_model = RenderingModel::ClientSideSpa;
                 items.push(StrategyItem {
@@ -155,7 +170,31 @@ pub fn build_strategy(findings: &[TechnologyFinding]) -> XssStrategy {
                     priority: 0.9,
                 });
             }
+            // A client-side sanitizer changes the whole approach: sinks are
+            // defended, so testing shifts to configuration gaps and bypasses
+            // rather than raw injection.
+            "DOMPurify" => {
+                items.push(StrategyItem {
+                    focus: "DOMPurify configuration gaps (ALLOWED_ATTR/ADD_TAGS, RETURN_DOM)".into(),
+                    rationale: "sinks are sanitized; look for permissive config, unsanitized SVG/MathML islands, and post-sanitize DOM mutation".into(),
+                    priority: 0.8,
+                });
+            }
             _ => {}
+        }
+
+        // Expert layer: when the *observed* version is a known-affected build,
+        // promote the concrete weakness + gadget into the strategy. These are
+        // the highest-priority items — a version-matched weakness is a far
+        // stronger lead than a generic context probe. Gadgets are detection
+        // guidance; confirmation against the live build is still required.
+        for w in &f.known_weaknesses {
+            let version = f.version.as_deref().unwrap_or("observed");
+            items.push(StrategyItem {
+                focus: format!("{} in {} {} [{}]", w.class.label(), f.technology, version, w.id),
+                rationale: format!("{} — Gadget: {}", w.summary, w.gadget),
+                priority: 0.97,
+            });
         }
     }
 
@@ -238,6 +277,7 @@ mod tests {
             confidence: 0.9,
             evidence: vec![],
             distinct_sources: 1,
+            known_weaknesses: vec![],
         }
     }
 
@@ -313,5 +353,40 @@ mod tests {
         let strategy = build_strategy(&findings);
         assert!(!strategy.is_generic());
         assert!(strategy.driven_by.iter().any(|d| d.contains("Next.js")));
+    }
+
+    #[test]
+    fn known_weakness_is_promoted_to_a_top_priority_item() {
+        use crate::technology::{KnownWeakness, WeaknessClass};
+        let mut f = finding("jQuery", TechCategory::ThirdPartyLibrary);
+        f.version = Some("3.4.1".into());
+        f.known_weaknesses = vec![KnownWeakness {
+            id: "CVE-2020-11022".into(),
+            class: WeaknessClass::MutationXss,
+            affected: "<3.5.0".into(),
+            summary: "htmlPrefilter mutation XSS".into(),
+            gadget: "$(html) with crafted markup".into(),
+        }];
+        let strategy = build_strategy(&[f]);
+        let item = strategy
+            .items
+            .iter()
+            .find(|i| i.focus.contains("CVE-2020-11022"))
+            .expect("version-matched weakness must become a strategy item");
+        assert!((item.priority - 0.97).abs() < f32::EPSILON);
+        assert!(item.focus.contains("jQuery") && item.focus.contains("3.4.1"));
+        assert!(item.rationale.contains("Gadget:"));
+        // It must be the highest-priority lead (items are priority-sorted).
+        assert_eq!(strategy.items.first().map(|i| i.priority), Some(0.97));
+    }
+
+    #[test]
+    fn angularjs_strategy_targets_csti() {
+        let strategy = build_strategy(&[finding("AngularJS", TechCategory::FrontendFramework)]);
+        assert_eq!(strategy.rendering_model, RenderingModel::ClientSideSpa);
+        assert!(strategy
+            .items
+            .iter()
+            .any(|i| i.focus.contains("client-side template injection")));
     }
 }

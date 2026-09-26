@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use bugtools_sql::payload::{
-    compose_for, ClauseStrategy, ComposeContext, EscalationTier, QuoteMode,
+    compose_for, tampers, ClauseStrategy, ComposeContext, EscalationTier, QuoteMode,
     RepresentationContext,
 };
 
@@ -17,8 +17,14 @@ pub fn run(
     tier: &str,
     technique: &str,
     waf: bool,
+    tamper: Option<&str>,
+    list_tampers: bool,
+    catalogue: bool,
     json: bool,
 ) -> Result<()> {
+    if list_tampers {
+        return list_available_tampers();
+    }
     let clause_strategy = match clause.to_lowercase().as_str() {
         "where" => ClauseStrategy::Where,
         "having" => ClauseStrategy::Having,
@@ -73,6 +79,10 @@ pub fn run(
 
     let dbms_family = dbms.and_then(parse_dbms_arg);
 
+    if catalogue {
+        return print_catalogue(dbms_family, tier);
+    }
+
     let ctx = ComposeContext {
         clause: clause_strategy,
         quote_mode,
@@ -82,7 +92,50 @@ pub fn run(
         waf_interference: waf,
     };
 
-    let candidates = compose_for(technique, &ctx, tier, 5);
+    // A named tamper chain (sqlmap's `--tamper`) is applied after composition
+    // and before serialization, so both the printed payload and the JSON document
+    // contain the exact bytes that would be sent. Every step lands in the
+    // candidate's trace, which is what makes a finding replayable.
+    //
+    // `--tamper auto` is our own addition: instead of hand-picking scripts, we
+    // recommend an engine-appropriate, priority-ordered chain from the `--dbms`
+    // and `--waf` context — dropping tampers that would not parse on the target.
+    let chain = if tamper.map(|t| t.trim().eq_ignore_ascii_case("auto")).unwrap_or(false) {
+        let c = tampers::recommend_chain(dbms_family, waf);
+        eprintln!("[*] auto-tamper: {}", c.summary());
+        c
+    } else {
+        tampers::resolve_chain(tamper.unwrap_or(""))
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+    };
+    let candidates: Vec<_> = if chain.is_identity() {
+        compose_for(technique, &ctx, tier, 5)
+    } else {
+        compose_for(technique, &ctx, tier, 5)
+            .into_iter()
+            .map(|mut c| {
+                let mut trace = c.trace.clone();
+                for step in &chain.steps {
+                    trace = trace.apply(*step);
+                }
+                c.rendered = trace.final_representation.clone();
+                c.trace = trace;
+                c
+            })
+            .collect()
+    };
+
+    if !json && !chain.is_identity() {
+        println!(
+            "[*] tampers: {}{}",
+            chain.summary(),
+            if chain.changes_semantics() {
+                " (semantics-changing steps: confirm with a differential)"
+            } else {
+                ""
+            }
+        );
+    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&candidates)?);
@@ -110,5 +163,96 @@ pub fn run(
             println!("     transform: {}", c.trace.summary());
         }
     }
+    Ok(())
+}
+
+/// Print the shared payload catalogue: everything the live engine can run, per
+/// technique, per depth tier, and per engine when one is named.
+fn print_catalogue(dbms: Option<bugtools_sql::DbmsFamily>, tier: EscalationTier) -> Result<()> {
+    use bugtools_sql::generators;
+
+    let summary = generators::catalog_summary();
+    let total: usize = summary.iter().map(|(_, n)| *n).sum();
+    println!(
+        "[*] catalogue: {total} payload(s) across {} technique(s)\n",
+        summary.iter().filter(|(_, n)| *n > 0).count()
+    );
+    for (name, n) in &summary {
+        println!("  {name:<14} {n:>3}");
+    }
+
+    println!("\n[*] depth gate:");
+    for t in [
+        EscalationTier::Recon,
+        EscalationTier::Confirm,
+        EscalationTier::Explore,
+    ] {
+        println!(
+            "  tier {:<8} {:>3} payload(s){}",
+            t.label(),
+            generators::catalog_for_tier(t).len(),
+            if t == tier { "   <- requested" } else { "" }
+        );
+    }
+
+    println!("\n[*] tampers: {} available (`--list-tampers` for the list)", bugtools_sql::payload::tampers::TAMPERS.len());
+
+    if let Some(fam) = dbms {
+        let profile = bugtools_sql::dialects::profile(fam);
+        let ctx = bugtools_sql::payload::VectorContext {
+            query: bugtools_sql::payload::extraction_query(&profile),
+            seconds: 5,
+            columns: 3,
+            host: String::new(),
+            truth: true,
+        };
+        println!(
+            "\n[*] {} engine catalogue: {} gated vector(s)",
+            fam.label(),
+            bugtools_sql::payload::catalog_size(fam, &ctx)
+        );
+        for channel in bugtools_sql::payload::vectors::ALL_CHANNELS {
+            println!(
+                "  {:<18} {:>3}",
+                channel.label(),
+                bugtools_sql::payload::vectors_for(fam, *channel, &ctx).len()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Print every named tamper and what it does (the `--list-tampers` surface).
+fn list_available_tampers() -> Result<()> {
+    use bugtools_sql::payload::tampers::DbmsTag;
+
+    println!(
+        "{} named tampers — sqlmap-compatible names where the semantics match.\n\
+         Chains are applied in PRIORITY order (structural rewrites before encoders),\n\
+         not the order typed, so a chain can never encode away the syntax a later\n\
+         rewrite needs. [tier] shows when each runs; {{dbms}} marks engine-specific ones.\n",
+        tampers::TAMPERS.len()
+    );
+    // Show highest-priority (earliest-applied) tampers first.
+    let mut sorted: Vec<&tampers::Tamper> = tampers::TAMPERS.iter().collect();
+    sorted.sort_by(|a, b| b.priority().cmp(&a.priority()));
+    for t in sorted {
+        let dbms = match t.dbms() {
+            DbmsTag::Any => String::new(),
+            DbmsTag::MySql => " {mysql}".to_string(),
+            DbmsTag::MsSql => " {mssql}".to_string(),
+            DbmsTag::PostgreSql => " {postgres}".to_string(),
+            DbmsTag::Oracle => " {oracle}".to_string(),
+            DbmsTag::SqLite => " {sqlite}".to_string(),
+        };
+        println!("  [{:>4}] {:<26}{} {}", t.priority(), t.name, dbms, t.note);
+    }
+    println!(
+        "\nChains auto-order by priority, so these two are identical and both correct:\n  \
+         bugtools payload --clause where --quote single --tamper charencode,between\n  \
+         bugtools payload --clause where --quote single --tamper between,charencode\n  \
+         bugtools sqli --input endpoints.json --i-authorize --depth explore \\\n      \
+         --tamper versionedmorekeywords,charunicodeencode"
+    );
     Ok(())
 }

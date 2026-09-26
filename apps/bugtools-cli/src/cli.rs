@@ -41,6 +41,33 @@ pub enum Commands {
         #[arg(long, value_delimiter = ',', default_value = "a,cname")]
         types: Vec<String>,
     },
+    /// DNS/TLS/HTTP reconnaissance via the embedded engine.
+    #[command(visible_alias = "rec", long_about = "Reconnaissance for one target, run by the engine baked into this binary: DNS enumeration (A/AAAA + reverse PTR, CNAME, MX, NS, TXT, SRV), TLS certificate inspection (issuer, validity, version/cipher, and in-scope SAN hostnames surfaced as discovered subdomains), and HTTP(S) probing (status, Server, final URL, title). Read-only.\n\nEXAMPLES:\n  bugtools recon example.com\n  bugtools rec example.com\n  bugtools recon example.com --json\n  bugtools recon example.com:8443 --no-http\n  bugtools recon example.com -q > recon.txt\n  bugtools recon example.com --engine ./engines/dns-go/dns.exe")]
+    Recon {
+        /// Domain, host:port, or URL to reconnoitre.
+        target: String,
+        /// Emit JSON instead of grouped, human-readable lines.
+        #[arg(short = 'j', long)]
+        json: bool,
+        /// Suppress the live progress indicator (results still print).
+        #[arg(short = 'q', long)]
+        quiet: bool,
+        /// Use this engine binary instead of the embedded one.
+        #[arg(long, value_name = "PATH")]
+        engine: Option<String>,
+        /// Skip TLS certificate inspection.
+        #[arg(long)]
+        no_tls: bool,
+        /// Skip HTTP(S) probing.
+        #[arg(long)]
+        no_http: bool,
+        /// Per-connection dial/handshake timeout, in seconds.
+        #[arg(long, default_value_t = 5)]
+        timeout: u64,
+        /// Overall time budget for the whole run, in seconds.
+        #[arg(long, default_value_t = 20)]
+        overall_timeout: u64,
+    },
     /// Run the full pipeline: discovery -> DNS -> HTTP -> crawl -> JSON.
     #[command(visible_alias = "p", long_about = "Full recon pipeline for a target: scope -> discovery -> DNS -> HTTP probe -> crawl -> summary.\n\nEXAMPLES:\n  bugtools p example.com\n  bugtools pipeline example.com --out result.json --depth 2 --max-urls 200")]
     Pipeline {
@@ -64,6 +91,12 @@ pub enum Commands {
     Sql {
         #[command(subcommand)]
         command: SqlCommands,
+    },
+    /// NoSQL research engine: MongoDB error fingerprinting + live operator injection.
+    #[command(visible_alias = "n", long_about = "NoSQL research engine (MongoDB-focused). Offline datastore fingerprinting from pasted error text, and live scope-checked operator-injection detection with a NOT_INTERPRETED negative finding. Every payload is read-only (writes/admin/server-exec operators are refused) and delay/size-capped.\n\nEXAMPLES:\n  bugtools n detect \"MongoError: E11000 duplicate key\"\n  bugtools nosql detect - < error.txt\n  bugtools n analyze \"https://target/login?user=alice\" -p user --i-authorize\n  bugtools nosql analyze \"https://target/api?user=x\" -p user -c session.txt --i-authorize --json")]
+    Nosql {
+        #[command(subcommand)]
+        command: NosqlCommands,
     },
     /// Fingerprint a target's technology stack from a live response.
     #[command(visible_alias = "x", long_about = "Technology intelligence: fingerprint the stack from headers, cookies, HTML and script paths, then derive the XSS strategy. Versions are reported only when the exact string is observed.\n\nEXAMPLES:\n  bugtools x https://example.com --i-authorize\n  bugtools tech https://example.com --i-authorize --json\n  bugtools x https://app.example.com -c session.txt -H \"X-Account-ID: 99\" --i-authorize")]
@@ -157,6 +190,20 @@ pub enum Commands {
         /// Simulate prior edge interference (widens representation breadth).
         #[arg(long)]
         waf: bool,
+        /// Apply a named tamper chain to the composed candidates,
+        /// e.g. `space2comment,randomcase,versionedmorekeywords`. Names match
+        /// sqlmap's tamper scripts where the semantics match ours; each step is
+        /// recorded so the result is replayable.
+        #[arg(long, value_name = "NAMES")]
+        tamper: Option<String>,
+        /// List the available tampers and exit.
+        #[arg(long)]
+        list_tampers: bool,
+        /// Print the shared payload catalogue — every payload the live engine
+        /// can run, per technique, per depth tier, and per engine when --dbms
+        /// is given. Sends nothing.
+        #[arg(long)]
+        catalogue: bool,
         /// Emit JSON instead of a human-readable table.
         #[arg(short = 'j', long)]
         json: bool,
@@ -214,8 +261,73 @@ pub enum Commands {
         /// program requires one, and available as X-Bug-Bounty otherwise.
         #[arg(long)]
         handle: Option<String>,
+        /// Known backend engine, so the engine-specific primitive catalogue is
+        /// used instead of being guessed from the sweep: mysql, mariadb,
+        /// postgresql, mssql, oracle, sqlite, db2, h2, sybase, firebird,
+        /// informix, hsqldb, maxdb, hana, clickhouse, cubrid, virtuoso,
+        /// monetdb, vertica, cache, presto, spanner, access.
+        #[arg(long)]
+        dbms: Option<String>,
+        /// Apply a named tamper chain to every payload in the sweep,
+        /// e.g. `space2comment,versionedmorekeywords`.
+        #[arg(long, value_name = "NAMES")]
+        tamper: Option<String>,
+        /// Restrict the sweep to these techniques: error, timing, union,
+        /// boolean, clause, syntax. Naming techniques overrides the depth
+        /// tier gate, because naming one is a direct instruction.
+        #[arg(long, value_delimiter = ',', value_name = "LIST")]
+        techniques: Vec<String>,
+        /// Disable the read-only proof extraction (version / current user /
+        /// current db / is-dba) that otherwise runs automatically once a
+        /// positive result is reached. Extraction is read-only SELECT only and
+        /// shares the request budget.
+        #[arg(long)]
+        no_prove: bool,
+        /// After the proof set, dump a table's rows read-only (sqlmap's
+        /// `--dump`). Opt-in and row-capped; prints a rules-of-engagement / PII
+        /// warning first. Requires --dump-table.
+        #[arg(long)]
+        dump: bool,
+        /// Table to dump when --dump is set. Extraction stays read-only SELECT.
+        #[arg(long, value_name = "TABLE")]
+        dump_table: Option<String>,
+        /// Row cap for --dump — kept small on purpose (most programs want
+        /// proof-of-access, not mass exfiltration).
+        #[arg(long, default_value_t = 5)]
+        max_rows: usize,
+        /// Enable out-of-band confirmation: induce the target DB to make an
+        /// outbound DNS/HTTP lookup to an operator-controlled collector, then
+        /// correlate a planted token. This is the only proof channel for a
+        /// fully blind injection. Opt-in and requires --i-authorize; it causes
+        /// the target database to emit outbound traffic to your collector.
+        #[arg(long)]
+        oob: bool,
+        /// OOB collector backend: `interactsh` (default; a self-hosted or
+        /// public interactsh server) or `byoc` (bring-your-own-collector — a
+        /// domain you own plus a poll URL/file, e.g. Burp Collaborator or a
+        /// custom DNS logger).
+        #[arg(long, value_name = "KIND", default_value = "interactsh")]
+        oob_provider: String,
+        /// BYOC: the callback domain you control (tokens attach as labels of
+        /// this domain). Required when --oob-provider byoc.
+        #[arg(long, value_name = "DOMAIN")]
+        oob_domain: Option<String>,
+        /// BYOC: where to read logged interactions — an HTTP(S) URL returning a
+        /// JSON array of interactions, or a local file the collector appends to.
+        #[arg(long, value_name = "URL|FILE")]
+        oob_poll: Option<String>,
+        /// interactsh: server host to register with and poll (self-hosted or
+        /// public). Defaults to the built-in public server.
+        #[arg(long, value_name = "HOST")]
+        oob_interactsh_server: Option<String>,
+        /// interactsh: optional authorization token for a protected server.
+        #[arg(long, value_name = "TOKEN")]
+        oob_token: Option<String>,
+        /// Seconds to wait after sending OOB payloads before polling the
+        /// collector, giving the target DB time to perform the lookup.
+        #[arg(long, default_value_t = 20, value_name = "SECS")]
+        oob_wait: u64,
     },
-    /// Discover endpoints from a page/bundle (offline) or a live URL.
     #[command(visible_alias = "e", long_about = "Endpoint discovery. Runs the composable extractor engine (HTML DOM, JavaScript request calls, and a path heuristic) over content and reports classified, route-templated endpoints with a confidence that reflects how many independent sources corroborate each one.\n\nOFFLINE (default): read a saved response/bundle from a file or stdin.\nLIVE (--i-authorize): fetch the URL through the scope-checked, rate-limited safe client, then dynamically follow the page's same-host scripts up to --depth and extract from those too.\n\nThe --profile flag sets a realistic browser header set (User-Agent, Accept, Sec-CH-UA) as defaults so an authorized scan presents as an ordinary client and is not trivially rejected. It sends a static, honest profile only: it does NOT spoof origin IPs, rotate headers, or attempt to defeat WAF/bot-management challenges.\n\nEXAMPLES:\n  bugtools e app.html --base https://target/\n  bugtools e - < bundle.js\n  bugtools e https://target/ --i-authorize\n  bugtools e https://target/ --i-authorize --depth 2 --profile chrome --json\n  bugtools e https://target/ --i-authorize --kind api --no-assets")]
     Endpoints {
         /// A file path, "-" for stdin, or (with --i-authorize) a URL to fetch.
@@ -286,7 +398,7 @@ pub enum SqlCommands {
         dbms: Option<String>,
     },
     /// Run scope-checked DBMS detection against a live parameterized URL.
-    #[command(visible_alias = "a", long_about = "Live scope-checked DBMS detection. Requires --i-authorize.\n\nEXAMPLES:\n  bugtools s a \"https://target/item?id=1\" --i-authorize\n  bugtools sql analyze \"https://target/item?id=1\" -p id -c session.txt --i-authorize")]
+    #[command(visible_alias = "a", long_about = "Live scope-checked DBMS detection. Requires --i-authorize.\n\nEXAMPLES:\n  bugtools s a \"https://target/item?id=1\" --i-authorize\n  bugtools sql analyze \"https://target/item?id=1\" -p id -c session.txt --i-authorize\n  bugtools sql analyze \"https://target/item?id=1\" -H \"X-Bug-Bounty: handle\" --json --i-authorize")]
     Analyze {
         /// Full URL including at least one query parameter, e.g.
         /// https://target/item?id=1
@@ -297,5 +409,75 @@ pub enum SqlCommands {
         /// Authorize this host for the scan. Without it, nothing is sent.
         #[arg(short = 'y', long)]
         i_authorize: bool,
+        /// Cookie(s): `name=value`, `a=1; b=2`, or a file path. Repeatable.
+        #[arg(short = 'c', long = "cookie")]
+        cookies: Vec<String>,
+        /// File containing a `Cookie:` header value or one `name=value` per line.
+        #[arg(long, value_name = "FILE")]
+        cookie_file: Option<String>,
+        /// Extra request header as `Name: value`. Repeatable.
+        #[arg(short = 'H', long = "header")]
+        headers: Vec<String>,
+        /// Bearer token; sent as `Authorization: Bearer <token>`.
+        #[arg(short = 'b', long)]
+        bearer: Option<String>,
+        /// Your researcher handle; sent as an X-Bug-Bounty identity header.
+        #[arg(long)]
+        handle: Option<String>,
+        /// Emit JSON instead of a human-readable summary.
+        #[arg(short = 'j', long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum NosqlCommands {
+    /// Fingerprint a NoSQL datastore from pasted error text (offline, no network).
+    #[command(visible_alias = "id", long_about = "Identify a NoSQL datastore (MongoDB/Mongoose, CouchDB, Redis, Elasticsearch, Cassandra) from error text. Sends nothing. Use \"-\" to read from stdin.\n\nEXAMPLES:\n  bugtools n detect \"MongoError: E11000 duplicate key error\"\n  bugtools n detect - < error.txt")]
+    Detect {
+        /// Error text. Use "-" to read from stdin.
+        text: String,
+    },
+    /// Run scope-checked NoSQL operator-injection detection against a live URL.
+    #[command(visible_alias = "a", long_about = "Live scope-checked NoSQL injection detection. Requires --i-authorize.\n\nBaselines the endpoint, then runs a bounded, deduplicated set of read-only operator-injection experiments (error probes, `$ne`/`$gt` auth-bypass, a matched boolean pair, and a capped `$where` timing probe), each repeated before it is trusted. Reports a coverage verdict including NOT_INTERPRETED when operator injection never diverges from a stable baseline. Optionally attempts a bounded, strictly read-only `$regex` prefix extraction of --extract-field, only after an injection differential is established.\n\nEXAMPLES:\n  bugtools n a \"https://target/login?user=alice\" -p user --i-authorize\n  bugtools nosql analyze \"https://target/api?user=x\" -p user -c session.txt --i-authorize --json\n  bugtools n a \"https://target/login?user=x\" -p user --extract-field password --i-authorize")]
+    Analyze {
+        /// Full URL including at least one query parameter, e.g.
+        /// https://target/login?user=alice
+        url: String,
+        /// Parameter to probe (defaults to the first query parameter).
+        #[arg(short = 'p', long)]
+        param: Option<String>,
+        /// Authorize this host for the scan. Without it, nothing is sent.
+        #[arg(short = 'y', long)]
+        i_authorize: bool,
+        /// Cookie(s): `name=value`, `a=1; b=2`, or a file path. Repeatable.
+        #[arg(short = 'c', long = "cookie")]
+        cookies: Vec<String>,
+        /// File containing a `Cookie:` header value or one `name=value` per line.
+        #[arg(long, value_name = "FILE")]
+        cookie_file: Option<String>,
+        /// Extra request header as `Name: value`. Repeatable.
+        #[arg(short = 'H', long = "header")]
+        headers: Vec<String>,
+        /// Bearer token; sent as `Authorization: Bearer <token>`.
+        #[arg(short = 'b', long)]
+        bearer: Option<String>,
+        /// Your researcher handle; sent as an X-Bug-Bounty identity header.
+        #[arg(long)]
+        handle: Option<String>,
+        /// Attempt bounded read-only `$regex` extraction of this field (only
+        /// after an injection differential is observed).
+        #[arg(long, value_name = "FIELD")]
+        extract_field: Option<String>,
+        /// Requested `$where` timing-probe delay in milliseconds (capped by the
+        /// safety gate).
+        #[arg(long, default_value_t = 3_000)]
+        where_delay_ms: u64,
+        /// Maximum requests to spend across the whole run.
+        #[arg(long, default_value_t = 16)]
+        max_experiments: usize,
+        /// Emit JSON instead of a human-readable summary.
+        #[arg(short = 'j', long)]
+        json: bool,
     },
 }

@@ -127,7 +127,34 @@ impl OobCorrelator {
             return None;
         }
         // DNS tokens may arrive case-folded; the stored token is lowercase.
-        Some(OobCorrelation {
+        Some(self.build_correlation(token, interaction))
+    }
+
+    /// Correlate when a planted token appears *within* the observed identifier
+    /// rather than equalling it.
+    ///
+    /// OOB exfiltration payloads produce a hostname of the form
+    /// `<leaked-data>.<planted-token>.<collector-id>.<collector-domain>`, so the
+    /// token is an interior DNS label — never the whole observed name. This
+    /// matches such an interaction to the planted token whose string is
+    /// contained in the (case-folded) identifier and whose window still holds.
+    /// It is a strict superset of [`correlate`]: an identifier equal to a
+    /// planted token still matches, and an identifier containing no planted
+    /// token (stray traffic) still never does.
+    pub fn correlate_contains(&self, interaction: &OobInteraction) -> Option<OobCorrelation> {
+        let observed = interaction.token.to_ascii_lowercase();
+        for token in self.tokens.values() {
+            if observed.contains(&token.token.to_ascii_lowercase())
+                && token.is_within_window(interaction.observed_at)
+            {
+                return Some(self.build_correlation(token, interaction));
+            }
+        }
+        None
+    }
+
+    fn build_correlation(&self, token: &OobToken, interaction: &OobInteraction) -> OobCorrelation {
+        OobCorrelation {
             token: token.token.clone(),
             target: token.target.clone(),
             endpoint: token.endpoint.clone(),
@@ -141,7 +168,7 @@ impl OobCorrelator {
                 InteractionType::Http => 45,
                 InteractionType::Database => 35,
             },
-        })
+        }
     }
 
     /// Correlate many interactions, discarding unmatched ones. Unmatched
@@ -154,6 +181,24 @@ impl OobCorrelator {
         let mut unmatched = Vec::new();
         for interaction in interactions {
             match self.correlate(interaction) {
+                Some(c) => correlated.push(c),
+                None => unmatched.push(interaction.clone()),
+            }
+        }
+        (correlated, unmatched)
+    }
+
+    /// Like [`correlate_batch`], but using [`correlate_contains`] — the matcher
+    /// the OOB collector path uses, where the token is an interior label of the
+    /// observed hostname.
+    pub fn correlate_batch_contains(
+        &self,
+        interactions: &[OobInteraction],
+    ) -> (Vec<OobCorrelation>, Vec<OobInteraction>) {
+        let mut correlated = Vec::new();
+        let mut unmatched = Vec::new();
+        for interaction in interactions {
+            match self.correlate_contains(interaction) {
                 Some(c) => correlated.push(c),
                 None => unmatched.push(interaction.clone()),
             }

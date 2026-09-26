@@ -89,6 +89,16 @@ pub fn apply_identity_header(headers: &mut HashMap<String, String>, handle: &str
         .or_insert_with(|| handle.to_string());
 }
 
+/// Strip a leading UTF-8 BOM (`\u{FEFF}`, on disk `EF BB BF`) from text.
+///
+/// PowerShell's `Set-Content` and `Out-File` prepend a BOM by default, so
+/// input files produced on Windows routinely start with one. Left in place it
+/// makes `serde_json::from_str` fail with the opaque "expected value at line 1
+/// column 1"; call this on any file/stdin text before parsing it.
+pub fn strip_bom(s: &str) -> &str {
+    s.strip_prefix('\u{feff}').unwrap_or(s)
+}
+
 /// Parse DNS record-type names.
 pub fn parse_record_types(types: &[String]) -> Vec<RecordType> {
     types
@@ -117,6 +127,22 @@ pub fn parse_dbms_arg(name: &str) -> Option<DbmsFamily> {
         "sqlite" => Some(DbmsFamily::SQLite),
         "db2" => Some(DbmsFamily::DB2),
         "h2" => Some(DbmsFamily::H2),
+        // sqlmap-parity engine families.
+        "sybase" | "ase" | "adaptive server" => Some(DbmsFamily::Sybase),
+        "firebird" | "interbase" => Some(DbmsFamily::Firebird),
+        "informix" | "ids" => Some(DbmsFamily::Informix),
+        "hsqldb" | "hsql" | "hypersql" => Some(DbmsFamily::HSQLDB),
+        "maxdb" | "sapdb" | "sap db" => Some(DbmsFamily::MaxDB),
+        "hana" | "saphana" | "sap hana" => Some(DbmsFamily::SAPHANA),
+        "clickhouse" | "ch" => Some(DbmsFamily::ClickHouse),
+        "cubrid" => Some(DbmsFamily::Cubrid),
+        "virtuoso" | "openlink" => Some(DbmsFamily::Virtuoso),
+        "monetdb" => Some(DbmsFamily::MonetDB),
+        "vertica" => Some(DbmsFamily::Vertica),
+        "cache" | "intersystems" | "iris" => Some(DbmsFamily::Cache),
+        "presto" | "trino" | "prestosql" => Some(DbmsFamily::Presto),
+        "spanner" | "cloudspanner" => Some(DbmsFamily::Spanner),
+        "access" | "jet" | "msaccess" => Some(DbmsFamily::Access),
         _ => None,
     }
 }
@@ -181,6 +207,14 @@ mod tests {
     fn record_types_parse() {
         let rts = parse_record_types(&["a".into(), "mx".into(), "bogus".into()]);
         assert_eq!(rts.len(), 2);
+    }
+
+    #[test]
+    fn strip_bom_removes_only_leading_bom() {
+        assert_eq!(strip_bom("\u{feff}{\"a\":1}"), "{\"a\":1}");
+        assert_eq!(strip_bom("{\"a\":1}"), "{\"a\":1}");
+        // A BOM elsewhere is left untouched.
+        assert_eq!(strip_bom("x\u{feff}y"), "x\u{feff}y");
     }
 
     #[test]

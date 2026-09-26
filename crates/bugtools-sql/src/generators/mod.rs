@@ -7,6 +7,7 @@ pub mod union_based;
 pub mod stacked_queries;
 pub mod oob_exfil;
 
+use crate::payload::compose::EscalationTier;
 use crate::types::ProbeType;
 use crate::clause_map::SqlClause;
 use crate::detection::DbmsFamily;
@@ -19,4 +20,163 @@ pub struct GeneratedPayload {
     pub payload_str: String,
     pub expected_dbms: Option<DbmsFamily>,
     pub clause: Option<SqlClause>,
+}
+
+/// Every payload the expert generators can produce, in execution order.
+///
+/// This is the single source of truth for "what the engine knows how to try".
+/// The adaptive planner (`analyze`), the batch scanner (`sqli`) and the offline
+/// inspector (`payload`) all read this list, which is what stops the two live
+/// paths from drifting apart: a payload added to a generator is immediately
+/// available to all three.
+pub fn catalog() -> Vec<GeneratedPayload> {
+    let mut out = Vec::new();
+    out.extend(error_based::generate());
+    out.extend(syntax_features::generate());
+    out.extend(clause_variants::generate());
+    out.extend(time_based::generate());
+    out.extend(stacked_queries::generate());
+    out.extend(boolean_based::generate());
+    out.extend(union_based::generate());
+    out
+}
+
+/// A stable label for a probe type (used in reports and JSON).
+pub fn technique_label(t: ProbeType) -> &'static str {
+    match t {
+        ProbeType::Baseline => "Baseline",
+        ProbeType::ErrorInjection => "ErrorInjection",
+        ProbeType::SyntaxFeature => "SyntaxFeature",
+        ProbeType::ClauseVariant => "ClauseVariant",
+        ProbeType::TimingProbe => "TimingProbe",
+        ProbeType::BooleanBlind => "BooleanBlind",
+        ProbeType::UnionBased => "UnionBased",
+    }
+}
+
+/// How many payloads exist per technique, in a stable order.
+pub fn catalog_summary() -> Vec<(&'static str, usize)> {
+    const ORDER: &[ProbeType] = &[
+        ProbeType::ErrorInjection,
+        ProbeType::TimingProbe,
+        ProbeType::UnionBased,
+        ProbeType::BooleanBlind,
+        ProbeType::ClauseVariant,
+        ProbeType::SyntaxFeature,
+    ];
+    let catalog = catalog();
+    ORDER
+        .iter()
+        .map(|t| {
+            (
+                technique_label(*t),
+                catalog.iter().filter(|p| p.probe_type == *t).count(),
+            )
+        })
+        .collect()
+}
+
+/// Whether a technique belongs to a tier's sweep.
+///
+/// Recon stays cheap and unambiguous (parser errors and a boolean pair);
+/// Confirm adds the timing, syntax and clause probes whose results need a
+/// stable baseline to mean anything; Explore adds union and stacked probing,
+/// which are the noisiest and the most likely to be blocked.
+pub fn tier_allows(tier: EscalationTier, t: ProbeType) -> bool {
+    match t {
+        ProbeType::Baseline => false,
+        ProbeType::ErrorInjection | ProbeType::BooleanBlind => true,
+        ProbeType::SyntaxFeature | ProbeType::ClauseVariant | ProbeType::TimingProbe => {
+            tier != EscalationTier::Recon
+        }
+        ProbeType::UnionBased => tier == EscalationTier::Explore,
+    }
+}
+
+/// The catalogue gated by escalation tier, so scan breadth scales with the
+/// depth the operator asked for instead of a fixed experiment cap.
+pub fn catalog_for_tier(tier: EscalationTier) -> Vec<GeneratedPayload> {
+    catalog()
+        .into_iter()
+        .filter(|p| tier_allows(tier, p.probe_type))
+        .collect()
+}
+
+/// Apply a named tamper chain to a whole payload catalogue.
+///
+/// Each entry keeps its original name with the chain appended
+/// (`err-mysql-extractvalue+space2comment`), so a report shows both what was
+/// tried and how it was encoded, and two encodings of one payload never
+/// collapse into a single deduplicated test.
+pub fn tamper_catalog(
+    payloads: Vec<GeneratedPayload>,
+    chain: &crate::payload::tampers::TamperChain,
+) -> Vec<GeneratedPayload> {
+    if chain.is_identity() {
+        return payloads;
+    }
+    let suffix = format!("+{}", chain.summary());
+    payloads
+        .into_iter()
+        .map(|mut p| {
+            p.payload_str = crate::payload::tampers::apply_chain(&p.payload_str, chain);
+            p.name.push_str(&suffix);
+            p
+        })
+        .collect()
+}
+
+/// The catalogue for a tier, with an optional tamper chain applied.
+pub fn catalog_for_tier_tampered(
+    tier: EscalationTier,
+    chain: &crate::payload::tampers::TamperChain,
+) -> Vec<GeneratedPayload> {
+    tamper_catalog(catalog_for_tier(tier), chain)
+}
+
+/// The full catalogue, with an optional tamper chain applied.
+pub fn catalog_tampered(
+    chain: &crate::payload::tampers::TamperChain,
+) -> Vec<GeneratedPayload> {
+    tamper_catalog(catalog(), chain)
+}
+/// An empty filter means "no restriction".
+/// The catalogue selected for one scan: tier-gated unless the operator named
+/// techniques explicitly, then tampered.
+///
+/// An explicit `--techniques` list overrides the tier gate, because naming a
+/// technique is a direct instruction; naming nothing means "whatever this depth
+/// is worth", which is the tier default.
+pub fn catalog_selected(
+    tier: EscalationTier,
+    labels: &[String],
+    chain: &crate::payload::tampers::TamperChain,
+) -> Vec<GeneratedPayload> {
+    let base = if labels.is_empty() {
+        catalog_for_tier(tier)
+    } else {
+        catalog_for_labels(labels)
+    };
+    tamper_catalog(base, chain)
+}
+
+/// The catalogue restricted to a set of technique labels (e.g. `error,union`).
+/// An empty filter means "no restriction".
+pub fn catalog_for_labels(labels: &[String]) -> Vec<GeneratedPayload> {
+    if labels.is_empty() {
+        return catalog();
+    }
+    catalog()
+        .into_iter()
+        .filter(|p| {
+            let name = technique_label(p.probe_type);
+            labels.iter().any(|l| {
+                let l = l.trim().to_ascii_lowercase();
+                !l.is_empty()
+                    && (name.to_ascii_lowercase() == l
+                        || name.to_ascii_lowercase().starts_with(&l)
+                        || l.starts_with(&name.to_ascii_lowercase()))
+            })
+        })
+        .collect()
 }

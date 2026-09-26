@@ -72,7 +72,7 @@ fn offline(input: &str, opts: &EndpointsOptions) -> Result<EndpointReport> {
         let url = url::Url::parse(base).map_err(|e| anyhow!("invalid --base '{base}': {e}"))?;
         engine = engine.with_base(url);
     }
-    Ok(engine.analyze(&content))
+    Ok(engine.analyze(crate::parsing::strip_bom(&content)))
 }
 
 /// Live: fetch the URL and its same-host scripts, then analyze the collected
